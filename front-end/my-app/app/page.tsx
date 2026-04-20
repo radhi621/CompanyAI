@@ -330,6 +330,124 @@ function isMedicationQuestion(prompt: string): boolean {
   );
 }
 
+function humanizeToolName(toolName: string): string {
+  return toolName.replaceAll("_", " ").trim();
+}
+
+function normalizeSummaryText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function renderPatientLabel(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const firstName = typeof value.firstName === "string" ? value.firstName.trim() : "";
+  const lastName = typeof value.lastName === "string" ? value.lastName.trim() : "";
+  const fullName = `${firstName} ${lastName}`.trim();
+  if (!fullName) {
+    return null;
+  }
+
+  const cin = typeof value.cin === "string" ? value.cin.trim() : "";
+  return cin ? `${fullName} (CIN ${cin})` : fullName;
+}
+
+function summarizeSearchPatientResult(result: unknown): string[] {
+  if (!isRecord(result) || !Array.isArray(result.patients)) {
+    return ["Patient search completed."];
+  }
+
+  const labels = result.patients
+    .map((patient) => renderPatientLabel(patient))
+    .filter((label): label is string => Boolean(label));
+
+  if (labels.length === 0) {
+    return ["No patient found matching the query."];
+  }
+
+  if (labels.length === 1) {
+    return [`Found patient: ${labels[0]}.`];
+  }
+
+  return [`Found ${labels.length} patients: ${labels.slice(0, 3).join(", ")}${labels.length > 3 ? ", ..." : ""}.`];
+}
+
+function summarizeRagSearchResult(result: unknown, userPrompt: string): string[] {
+  if (!isRecord(result) || !Array.isArray(result.matches)) {
+    return ["Medical records search completed."];
+  }
+
+  if (isMedicationQuestion(userPrompt)) {
+    const medications = extractMedicationLinesFromMatches(result.matches).slice(0, 8);
+    if (medications.length === 0) {
+      return ["I checked the medical records but could not extract explicit medication lines."];
+    }
+
+    return ["Medications found in patient records:", ...medications.map((entry) => `- ${entry}`)];
+  }
+
+  const matchCount = result.matches.length;
+  if (matchCount === 0) {
+    return ["No relevant records were found for this question."];
+  }
+
+  const topMatch = result.matches[0];
+  const topContent =
+    isRecord(topMatch) && typeof topMatch.content === "string"
+      ? normalizeSummaryText(topMatch.content)
+      : "";
+  const topSource =
+    isRecord(topMatch) && typeof topMatch.sourceLabel === "string" ? topMatch.sourceLabel : null;
+
+  const summary = [
+    `Found ${matchCount} relevant record match${matchCount > 1 ? "es" : ""}.`,
+    topContent ? `Top match${topSource ? ` (${topSource})` : ""}: ${truncateText(topContent, 220)}` : null,
+  ].filter((line): line is string => Boolean(line));
+
+  return summary;
+}
+
+function summarizeGenericToolResult(toolName: string, result: unknown): string[] {
+  if (!isRecord(result)) {
+    return [`${humanizeToolName(toolName)} executed.`];
+  }
+
+  const lines: string[] = [];
+
+  if (typeof result.message === "string") {
+    lines.push(normalizeSummaryText(result.message));
+  }
+
+  if (typeof result.total === "number") {
+    lines.push(`Total: ${result.total}.`);
+  }
+
+  const primaryArrayEntry = Object.entries(result).find(([, value]) => Array.isArray(value));
+  if (primaryArrayEntry) {
+    const [key, value] = primaryArrayEntry;
+    const length = Array.isArray(value) ? value.length : 0;
+    lines.push(`${humanizeToolName(key)}: ${length}.`);
+  }
+
+  const primitiveDetails = Object.entries(result)
+    .filter(([, value]) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
+    .filter(([key]) => key !== "message" && key !== "total")
+    .slice(0, 4)
+    .map(([key, value]) => `${key}: ${String(value)}`);
+
+  if (primitiveDetails.length > 0) {
+    lines.push(primitiveDetails.join(" | "));
+  }
+
+  if (lines.length === 0) {
+    return [`${humanizeToolName(toolName)} completed successfully.`];
+  }
+
+  return lines;
+}
+
 function extractPatientNameFromSearchResult(items: ToolExecutionResultItem[]): string | null {
   const searchPatientResult = items.find((item) => item.tool === "search_patient")?.result;
   if (!isRecord(searchPatientResult) || !Array.isArray(searchPatientResult.patients)) {
@@ -351,27 +469,47 @@ function formatConversationResultText(
   result: AgentExecutionResult,
   userPrompt: string,
 ): string | null {
-  if (!isMedicationQuestion(userPrompt)) {
-    return null;
-  }
-
   const items = parseToolExecutionItems(result.results);
-  const ragResult = items.find((item) => item.tool === "search_medical_records_RAG")?.result;
-  if (!isRecord(ragResult)) {
-    return null;
+  if (items.length === 0) {
+    return result.finalMessage ?? result.message ?? null;
   }
 
-  const medications = extractMedicationLinesFromMatches(ragResult.matches).slice(0, 8);
-  if (medications.length === 0) {
-    return "I checked the medical records but could not extract explicit medication lines.";
+  const lines: string[] = [];
+
+  for (const item of items) {
+    let sectionLines: string[];
+
+    if (item.tool === "search_patient") {
+      sectionLines = summarizeSearchPatientResult(item.result);
+    } else if (item.tool === "search_medical_records_RAG") {
+      sectionLines = summarizeRagSearchResult(item.result, userPrompt);
+    } else {
+      sectionLines = summarizeGenericToolResult(item.tool, item.result);
+    }
+
+    if (sectionLines.length > 0) {
+      lines.push(...sectionLines);
+    }
+  }
+
+  const uniqueLines = Array.from(
+    new Set(
+      lines
+        .map((line) => line.trim())
+        .filter(Boolean),
+    ),
+  );
+
+  if (uniqueLines.length === 0) {
+    return result.finalMessage ?? result.message ?? "Tools executed successfully.";
   }
 
   const patientName = extractPatientNameFromSearchResult(items);
-  const header = patientName
-    ? `Medications found for ${patientName}:`
-    : "Medications found in patient records:";
+  if (patientName && isMedicationQuestion(userPrompt)) {
+    uniqueLines.unshift(`Answer for ${patientName}:`);
+  }
 
-  return [header, ...medications.map((entry) => `- ${entry}`)].join("\n");
+  return truncateText(uniqueLines.join("\n"), 1600);
 }
 
 function sanitizeToolCalls(value: unknown): AgentToolCall[] {
