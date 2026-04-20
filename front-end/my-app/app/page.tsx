@@ -63,6 +63,21 @@ interface AgentConfirmResult {
   results?: unknown;
 }
 
+interface RAGSourceFileItem {
+  fileName: string;
+  extension: string;
+  chunkCount: number | null;
+}
+
+interface RAGRecordListItem {
+  id: string;
+  title: string | null;
+  prompt: string;
+  provider: string | null;
+  createdAt: string | null;
+  sourceFiles: RAGSourceFileItem[];
+}
+
 interface Feedback {
   type: FeedbackType;
   message: string;
@@ -265,6 +280,150 @@ function parseToolExecutionItems(value: unknown): ToolExecutionResultItem[] {
   return items;
 }
 
+function parseNumberCandidate(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+  }
+
+  return null;
+}
+
+function parseRagSourceFileItems(value: unknown): RAGSourceFileItem[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const items: RAGSourceFileItem[] = [];
+
+  for (const candidate of value) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+
+    const fileName = typeof candidate.fileName === "string" ? candidate.fileName.trim() : "";
+    if (!fileName) {
+      continue;
+    }
+
+    const extension = typeof candidate.extension === "string" ? candidate.extension.trim() : "";
+    const chunkCount = parseNumberCandidate(candidate.chunkCount);
+
+    items.push({
+      fileName,
+      extension,
+      chunkCount,
+    });
+  }
+
+  return items;
+}
+
+function parseRagRecordList(value: unknown): RAGRecordListItem[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const items: RAGRecordListItem[] = [];
+
+  for (const candidate of value) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+
+    const id = typeof candidate._id === "string" ? candidate._id.trim() : "";
+    const mode = typeof candidate.mode === "string" ? candidate.mode : "";
+    if (!id || mode !== "rag") {
+      continue;
+    }
+
+    const title = typeof candidate.title === "string" ? candidate.title.trim() || null : null;
+    const prompt = typeof candidate.prompt === "string" ? candidate.prompt.trim() : "";
+    const provider =
+      typeof candidate.provider === "string" ? candidate.provider.trim() || null : null;
+    const createdAt =
+      typeof candidate.createdAt === "string" ? candidate.createdAt.trim() || null : null;
+
+    items.push({
+      id,
+      title,
+      prompt,
+      provider,
+      createdAt,
+      sourceFiles: parseRagSourceFileItems(candidate.sourceFiles),
+    });
+  }
+
+  return items;
+}
+
+function toOptionalString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function renderPersonName(value: unknown): string | null {
+  if (typeof value === "string") {
+    const direct = value.trim();
+    return direct.length > 0 ? direct : null;
+  }
+
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const firstName = toOptionalString(value.firstName);
+  const lastName = toOptionalString(value.lastName);
+  const fullName = toOptionalString(value.fullName);
+  const name = toOptionalString(value.name);
+
+  if (firstName || lastName) {
+    return `${firstName ?? ""} ${lastName ?? ""}`.trim();
+  }
+
+  return fullName ?? name;
+}
+
+function renderPathologies(value: unknown): string | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const items = value
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .slice(0, 6);
+
+  if (items.length === 0) {
+    return null;
+  }
+
+  return items.join(", ");
+}
+
+function renderEntityIdentifier(value: unknown): string | null {
+  return getObjectIdCandidate(value);
+}
+
+function renderDateLabel(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  return formatDateTime(value);
+}
+
 function normalizeMedicationLine(line: string): string {
   return line
     .replace(/^[-*\d.)\s]+/, "")
@@ -343,14 +502,12 @@ function renderPatientLabel(value: unknown): string | null {
     return null;
   }
 
-  const firstName = typeof value.firstName === "string" ? value.firstName.trim() : "";
-  const lastName = typeof value.lastName === "string" ? value.lastName.trim() : "";
-  const fullName = `${firstName} ${lastName}`.trim();
+  const fullName = renderPersonName(value);
   if (!fullName) {
     return null;
   }
 
-  const cin = typeof value.cin === "string" ? value.cin.trim() : "";
+  const cin = toOptionalString(value.cin) ?? "";
   return cin ? `${fullName} (CIN ${cin})` : fullName;
 }
 
@@ -359,19 +516,219 @@ function summarizeSearchPatientResult(result: unknown): string[] {
     return ["Patient search completed."];
   }
 
-  const labels = result.patients
-    .map((patient) => renderPatientLabel(patient))
-    .filter((label): label is string => Boolean(label));
+  const patients = result.patients.filter((patient): patient is Record<string, unknown> =>
+    isRecord(patient),
+  );
+
+  const labels = patients.map((patient) => renderPatientLabel(patient)).filter(Boolean) as string[];
 
   if (labels.length === 0) {
     return ["No patient found matching the query."];
   }
 
   if (labels.length === 1) {
-    return [`Found patient: ${labels[0]}.`];
+    const patient = patients[0];
+    const details: string[] = [];
+    const phone = toOptionalString(patient.phone);
+    const email = toOptionalString(patient.email);
+    const pathologies = renderPathologies(patient.pathologies);
+    const id = renderEntityIdentifier(patient._id) ?? renderEntityIdentifier(patient.id);
+
+    if (phone) {
+      details.push(`Phone: ${phone}`);
+    }
+
+    if (email) {
+      details.push(`Email: ${email}`);
+    }
+
+    if (pathologies) {
+      details.push(`Pathologies: ${pathologies}`);
+    }
+
+    if (id) {
+      details.push(`ID: ${id}`);
+    }
+
+    return [
+      `Patient identified: ${labels[0]}.`,
+      ...(details.length > 0 ? [`Details: ${details.join(" | ")}`] : []),
+    ];
   }
 
-  return [`Found ${labels.length} patients: ${labels.slice(0, 3).join(", ")}${labels.length > 3 ? ", ..." : ""}.`];
+  const lines = [`Matched ${labels.length} patients:`];
+  labels.slice(0, 5).forEach((label) => {
+    lines.push(`- ${label}`);
+  });
+
+  if (labels.length > 5) {
+    lines.push(`- ...and ${labels.length - 5} more.`);
+  }
+
+  return lines;
+}
+
+function summarizeDoctorsResult(result: unknown): string[] {
+  if (!isRecord(result) || !Array.isArray(result.doctors)) {
+    return ["Doctor listing completed."];
+  }
+
+  const doctors = result.doctors.filter((doctor): doctor is Record<string, unknown> => isRecord(doctor));
+  if (doctors.length === 0) {
+    return ["No doctors found for the requested filters."];
+  }
+
+  const lines = [`Doctors found: ${doctors.length}.`];
+  doctors.slice(0, 6).forEach((doctor) => {
+    const name = renderPersonName(doctor) ?? "Unknown doctor";
+    const specialty = toOptionalString(doctor.specialty);
+    const id = renderEntityIdentifier(doctor._id) ?? renderEntityIdentifier(doctor.id);
+    const status = typeof doctor.isActive === "boolean" ? (doctor.isActive ? "active" : "inactive") : null;
+
+    const detail = [specialty, status].filter(Boolean).join(" | ");
+    lines.push(`- ${name}${detail ? ` (${detail})` : ""}${id ? ` | id ${id}` : ""}`);
+  });
+
+  if (doctors.length > 6) {
+    lines.push(`- ...and ${doctors.length - 6} more.`);
+  }
+
+  return lines;
+}
+
+function summarizePatientsListResult(result: unknown): string[] {
+  if (!isRecord(result) || !Array.isArray(result.patients)) {
+    return ["Patient listing completed."];
+  }
+
+  const patients = result.patients.filter((patient): patient is Record<string, unknown> => isRecord(patient));
+  if (patients.length === 0) {
+    return ["No patients found."];
+  }
+
+  const lines = [`Patients found: ${patients.length}.`];
+  patients.slice(0, 6).forEach((patient) => {
+    const label = renderPatientLabel(patient) ?? "Unknown patient";
+    const pathologies = renderPathologies(patient.pathologies);
+    lines.push(`- ${label}${pathologies ? ` | pathologies: ${pathologies}` : ""}`);
+  });
+
+  if (patients.length > 6) {
+    lines.push(`- ...and ${patients.length - 6} more.`);
+  }
+
+  return lines;
+}
+
+function summarizeAppointmentEntry(entry: Record<string, unknown>): string {
+  const when = renderDateLabel(entry.startAt) ?? renderDateLabel(entry.startAtUtc);
+  const status = toOptionalString(entry.status);
+  const reason = toOptionalString(entry.reason) ?? toOptionalString(entry.motif);
+  const patient = renderPersonName(entry.patientId) ?? renderPersonName(entry.patient) ?? toOptionalString(entry.patientName);
+  const doctor = renderPersonName(entry.doctorId) ?? renderPersonName(entry.doctor) ?? toOptionalString(entry.doctorName);
+
+  const segments = [
+    when ? `Time: ${when}` : null,
+    status ? `Status: ${status}` : null,
+    patient ? `Patient: ${patient}` : null,
+    doctor ? `Doctor: ${doctor}` : null,
+    reason ? `Reason: ${truncateText(reason, 90)}` : null,
+  ].filter((segment): segment is string => Boolean(segment));
+
+  return segments.length > 0 ? segments.join(" | ") : "Appointment details available.";
+}
+
+function summarizeAppointmentsResult(result: unknown): string[] {
+  const appointments = Array.isArray(result)
+    ? result
+    : isRecord(result) && Array.isArray(result.appointments)
+      ? result.appointments
+      : [];
+
+  const entries = appointments.filter((item): item is Record<string, unknown> => isRecord(item));
+  if (entries.length === 0) {
+    return ["No appointments found for the selected filters."];
+  }
+
+  const lines = [`Appointments found: ${entries.length}.`];
+  entries.slice(0, 5).forEach((appointment) => {
+    lines.push(`- ${summarizeAppointmentEntry(appointment)}`);
+  });
+
+  if (entries.length > 5) {
+    lines.push(`- ...and ${entries.length - 5} more.`);
+  }
+
+  return lines;
+}
+
+function summarizeCheckAvailabilityResult(result: unknown): string[] {
+  if (!isRecord(result)) {
+    return ["Availability check completed."];
+  }
+
+  const isAvailable = typeof result.isAvailable === "boolean" ? result.isAvailable : null;
+  const requestedLocal = renderDateLabel(result.requestedStartAtLocal);
+  const duration = typeof result.estimatedDurationMinutes === "number" ? result.estimatedDurationMinutes : null;
+
+  const lines = [
+    isAvailable === null
+      ? "Availability check completed."
+      : isAvailable
+        ? "Doctor is available at the requested slot."
+        : "Doctor is not available at the requested slot.",
+    requestedLocal ? `Requested time: ${requestedLocal}.` : null,
+    duration ? `Estimated duration: ${duration} minutes.` : null,
+  ].filter((line): line is string => Boolean(line));
+
+  const suggestedSlots = Array.isArray(result.suggestedSlots) ? result.suggestedSlots : [];
+  const slotLabels = suggestedSlots
+    .map((slot) => {
+      if (!isRecord(slot)) {
+        return null;
+      }
+
+      return renderDateLabel(slot.startAtLocal) ?? renderDateLabel(slot.startAtUtc);
+    })
+    .filter((slot): slot is string => Boolean(slot))
+    .slice(0, 4);
+
+  if (slotLabels.length > 0) {
+    lines.push(`Suggested slots: ${slotLabels.join(", ")}.`);
+  }
+
+  return lines;
+}
+
+function summarizePatientSummaryResult(result: unknown): string[] {
+  if (!isRecord(result) || !isRecord(result.patient)) {
+    return ["Patient summary fetched."];
+  }
+
+  const patient = result.patient;
+  const patientName = renderPersonName(patient) ?? "Patient";
+  const pathologies = renderPathologies(patient.pathologies);
+  const lines = [
+    `Patient summary for ${patientName}${pathologies ? ` (pathologies: ${pathologies})` : ""}.`,
+  ];
+
+  const recentAppointments = Array.isArray(result.recentAppointments) ? result.recentAppointments : [];
+  const recentNotes = Array.isArray(result.recentNotes) ? result.recentNotes : [];
+  const recentAIRecords = Array.isArray(result.recentAIRecords) ? result.recentAIRecords : [];
+
+  lines.push(
+    `Recent activity: appointments ${recentAppointments.length}, notes ${recentNotes.length}, AI records ${recentAIRecords.length}.`,
+  );
+
+  if (recentAppointments.length > 0 && isRecord(recentAppointments[0])) {
+    lines.push(`Latest appointment: ${summarizeAppointmentEntry(recentAppointments[0])}`);
+  }
+
+  if (recentNotes.length > 0 && isRecord(recentNotes[0]) && typeof recentNotes[0].content === "string") {
+    lines.push(`Latest note: ${truncateText(normalizeSummaryText(recentNotes[0].content), 140)}`);
+  }
+
+  return lines;
 }
 
 function summarizeRagSearchResult(result: unknown, userPrompt: string): string[] {
@@ -385,7 +742,25 @@ function summarizeRagSearchResult(result: unknown, userPrompt: string): string[]
       return ["I checked the medical records but could not extract explicit medication lines."];
     }
 
-    return ["Medications found in patient records:", ...medications.map((entry) => `- ${entry}`)];
+    const lines = ["Medications found in patient records:", ...medications.map((entry) => `- ${entry}`)];
+
+    const evidence = result.matches
+      .slice(0, 2)
+      .map((match) => {
+        if (!isRecord(match)) {
+          return null;
+        }
+
+        const metadata = isRecord(match.metadata) ? match.metadata : null;
+        return toOptionalString(metadata?.fileName) ?? toOptionalString(match.sourceLabel);
+      })
+      .filter((label): label is string => Boolean(label));
+
+    if (evidence.length > 0) {
+      lines.push(`Evidence sources: ${Array.from(new Set(evidence)).join(", ")}.`);
+    }
+
+    return lines;
   }
 
   const matchCount = result.matches.length;
@@ -393,20 +768,26 @@ function summarizeRagSearchResult(result: unknown, userPrompt: string): string[]
     return ["No relevant records were found for this question."];
   }
 
-  const topMatch = result.matches[0];
-  const topContent =
-    isRecord(topMatch) && typeof topMatch.content === "string"
-      ? normalizeSummaryText(topMatch.content)
-      : "";
-  const topSource =
-    isRecord(topMatch) && typeof topMatch.sourceLabel === "string" ? topMatch.sourceLabel : null;
+  const lines = [`Relevant evidence found: ${matchCount} record match${matchCount > 1 ? "es" : ""}.`];
+  result.matches.slice(0, 3).forEach((match, index) => {
+    if (!isRecord(match) || typeof match.content !== "string") {
+      return;
+    }
 
-  const summary = [
-    `Found ${matchCount} relevant record match${matchCount > 1 ? "es" : ""}.`,
-    topContent ? `Top match${topSource ? ` (${topSource})` : ""}: ${truncateText(topContent, 220)}` : null,
-  ].filter((line): line is string => Boolean(line));
+    const metadata = isRecord(match.metadata) ? match.metadata : null;
+    const sourceLabel =
+      toOptionalString(metadata?.fileName) ??
+      toOptionalString(match.sourceLabel) ??
+      `source ${index + 1}`;
 
-  return summary;
+    lines.push(`- ${sourceLabel}: ${truncateText(normalizeSummaryText(match.content), 180)}`);
+  });
+
+  if (typeof result.fallbackUsed === "string") {
+    lines.push(`Retrieval mode: ${result.fallbackUsed}.`);
+  }
+
+  return lines;
 }
 
 function summarizeGenericToolResult(toolName: string, result: unknown): string[] {
@@ -427,8 +808,25 @@ function summarizeGenericToolResult(toolName: string, result: unknown): string[]
   const primaryArrayEntry = Object.entries(result).find(([, value]) => Array.isArray(value));
   if (primaryArrayEntry) {
     const [key, value] = primaryArrayEntry;
-    const length = Array.isArray(value) ? value.length : 0;
-    lines.push(`${humanizeToolName(key)}: ${length}.`);
+    const entries = Array.isArray(value)
+      ? value.filter((entry): entry is Record<string, unknown> => isRecord(entry))
+      : [];
+    const length = entries.length;
+
+    if (length > 0) {
+      const preview = entries
+        .slice(0, 4)
+        .map((entry) => renderPersonName(entry) ?? toOptionalString(entry.title) ?? toOptionalString(entry.reason))
+        .filter((label): label is string => Boolean(label));
+
+      lines.push(
+        preview.length > 0
+          ? `${humanizeToolName(key)} (${length}): ${preview.join(", ")}${length > preview.length ? ", ..." : ""}.`
+          : `${humanizeToolName(key)} returned ${length} item(s).`,
+      );
+    } else {
+      lines.push(`${humanizeToolName(key)}: 0.`);
+    }
   }
 
   const primitiveDetails = Object.entries(result)
@@ -479,12 +877,32 @@ function formatConversationResultText(
   for (const item of items) {
     let sectionLines: string[];
 
-    if (item.tool === "search_patient") {
-      sectionLines = summarizeSearchPatientResult(item.result);
-    } else if (item.tool === "search_medical_records_RAG") {
-      sectionLines = summarizeRagSearchResult(item.result, userPrompt);
-    } else {
-      sectionLines = summarizeGenericToolResult(item.tool, item.result);
+    switch (item.tool) {
+      case "search_patient":
+        sectionLines = summarizeSearchPatientResult(item.result);
+        break;
+      case "search_medical_records_RAG":
+        sectionLines = summarizeRagSearchResult(item.result, userPrompt);
+        break;
+      case "list_doctors":
+        sectionLines = summarizeDoctorsResult(item.result);
+        break;
+      case "list_patients":
+        sectionLines = summarizePatientsListResult(item.result);
+        break;
+      case "list_appointments":
+      case "get_day_schedule":
+        sectionLines = summarizeAppointmentsResult(item.result);
+        break;
+      case "check_availability":
+        sectionLines = summarizeCheckAvailabilityResult(item.result);
+        break;
+      case "get_patient_summary":
+        sectionLines = summarizePatientSummaryResult(item.result);
+        break;
+      default:
+        sectionLines = summarizeGenericToolResult(item.tool, item.result);
+        break;
     }
 
     if (sectionLines.length > 0) {
@@ -505,11 +923,13 @@ function formatConversationResultText(
   }
 
   const patientName = extractPatientNameFromSearchResult(items);
-  if (patientName && isMedicationQuestion(userPrompt)) {
+  if (patientName) {
     uniqueLines.unshift(`Answer for ${patientName}:`);
+  } else {
+    uniqueLines.unshift("Answer:");
   }
 
-  return truncateText(uniqueLines.join("\n"), 1600);
+  return truncateText(uniqueLines.join("\n"), 2200);
 }
 
 function sanitizeToolCalls(value: unknown): AgentToolCall[] {
@@ -905,6 +1325,10 @@ export default function Home() {
     title: "",
     prompt: "",
   });
+  const [ragRetentionPatientId, setRagRetentionPatientId] = useState("");
+  const [ragRecords, setRagRecords] = useState<RAGRecordListItem[]>([]);
+  const [keptRagRecordIds, setKeptRagRecordIds] = useState<string[]>([]);
+  const [ragManagerBusy, setRagManagerBusy] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [fileInputKey, setFileInputKey] = useState(0);
   const [contextEnabled, setContextEnabled] = useState(true);
@@ -1486,6 +1910,177 @@ export default function Home() {
     }
   };
 
+  const handleLoadRagRecords = useCallback(async () => {
+    const patientId = ragRetentionPatientId.trim();
+    if (!patientId) {
+      showFeedback("error", "Patient ID is required to load RAG records.");
+      return;
+    }
+
+    setRagManagerBusy(true);
+
+    try {
+      const query = new URLSearchParams({
+        patientId,
+        mode: "rag",
+        limit: "100",
+      });
+      const result = await apiRequest<unknown[]>(`/ai/records?${query.toString()}`);
+      const parsedRecords = parseRagRecordList(result);
+
+      setRagRecords(parsedRecords);
+      setKeptRagRecordIds(parsedRecords.map((record) => record.id));
+
+      if (parsedRecords.length === 0) {
+        showFeedback("info", "No active RAG records found for this patient.");
+        return;
+      }
+
+      showFeedback(
+        "success",
+        `Loaded ${parsedRecords.length} RAG record(s). Uncheck entries you want to delete, then run cleanup.`,
+      );
+    } catch (error) {
+      showFeedback("error", extractErrorMessage(error));
+    } finally {
+      setRagManagerBusy(false);
+    }
+  }, [apiRequest, ragRetentionPatientId, showFeedback]);
+
+  const handleToggleKeptRagRecord = useCallback((recordId: string) => {
+    setKeptRagRecordIds((current) => {
+      if (current.includes(recordId)) {
+        return current.filter((id) => id !== recordId);
+      }
+
+      return [...current, recordId];
+    });
+  }, []);
+
+  const executeRagDeletion = useCallback(
+    async (recordIds: string[], label: string) => {
+      if (recordIds.length === 0) {
+        showFeedback("info", "No RAG records matched this delete action.");
+        return;
+      }
+
+      setRagManagerBusy(true);
+
+      try {
+        const outcomes = await Promise.allSettled(
+          recordIds.map((recordId) =>
+            apiRequest<null>(`/ai/records/${recordId}`, {
+              method: "DELETE",
+            }),
+          ),
+        );
+
+        const deletedIds: string[] = [];
+        const failed: Array<{ id: string; message: string }> = [];
+
+        outcomes.forEach((outcome, index) => {
+          const targetId = recordIds[index];
+          if (!targetId) {
+            return;
+          }
+
+          if (outcome.status === "fulfilled") {
+            deletedIds.push(targetId);
+            return;
+          }
+
+          failed.push({
+            id: targetId,
+            message: extractErrorMessage(outcome.reason),
+          });
+        });
+
+        if (deletedIds.length > 0) {
+          const deletedSet = new Set(deletedIds);
+          setRagRecords((current) => current.filter((record) => !deletedSet.has(record.id)));
+          setKeptRagRecordIds((current) => current.filter((id) => !deletedSet.has(id)));
+        }
+
+        const summaryText = `${label}: deleted ${deletedIds.length}/${recordIds.length} record(s).${
+          failed.length > 0 ? ` Failed: ${failed.length}.` : ""
+        }`;
+
+        pushHistory({
+          kind: "result",
+          title: "RAG cleanup",
+          text: summaryText,
+          payload: {
+            action: label,
+            requested: recordIds,
+            deletedIds,
+            failed,
+          },
+        });
+
+        if (failed.length > 0) {
+          const preview = failed
+            .slice(0, 2)
+            .map((item) => `${item.id}: ${item.message}`)
+            .join(" | ");
+          showFeedback(
+            "error",
+            `Deleted ${deletedIds.length} record(s), ${failed.length} failed. ${preview}`,
+          );
+          return;
+        }
+
+        showFeedback("success", `Deleted ${deletedIds.length} RAG record(s) successfully.`);
+      } finally {
+        setRagManagerBusy(false);
+      }
+    },
+    [apiRequest, pushHistory, showFeedback],
+  );
+
+  const handleDeleteUncheckedRagRecords = useCallback(async () => {
+    const keepSet = new Set(keptRagRecordIds);
+    const targetIds = ragRecords
+      .filter((record) => !keepSet.has(record.id))
+      .map((record) => record.id);
+
+    if (targetIds.length === 0) {
+      showFeedback("info", "All loaded RAG records are currently marked to keep.");
+      return;
+    }
+
+    if (typeof window !== "undefined") {
+      const confirmed = window.confirm(
+        `Delete ${targetIds.length} unchecked RAG record(s) and keep ${keepSet.size} checked record(s)?`,
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    await executeRagDeletion(targetIds, "delete_unchecked_keep_checked");
+  }, [executeRagDeletion, keptRagRecordIds, ragRecords, showFeedback]);
+
+  const handleDeleteCheckedRagRecords = useCallback(async () => {
+    const keepSet = new Set(keptRagRecordIds);
+    const targetIds = ragRecords
+      .filter((record) => keepSet.has(record.id))
+      .map((record) => record.id);
+
+    if (targetIds.length === 0) {
+      showFeedback("info", "No checked records selected for deletion.");
+      return;
+    }
+
+    if (typeof window !== "undefined") {
+      const confirmed = window.confirm(`Delete ${targetIds.length} checked RAG record(s)?`);
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    await executeRagDeletion(targetIds, "delete_checked_records");
+  }, [executeRagDeletion, keptRagRecordIds, ragRecords, showFeedback]);
+
   const quickPrompts = useMemo(() => {
     const prioritizedEntities = [...entityMemory].sort((left, right) => {
       const leftPinned = pinnedEntityKeySet.has(entityKey(left));
@@ -1524,6 +2119,21 @@ export default function Home() {
   const knownPatients = useMemo(
     () => entityMemory.filter((entry) => entry.type === "patient"),
     [entityMemory],
+  );
+  const keptRagRecordIdSet = useMemo(() => new Set(keptRagRecordIds), [keptRagRecordIds]);
+  const ragRecordsMarkedForDeletion = useMemo(
+    () => ragRecords.filter((record) => !keptRagRecordIdSet.has(record.id)).length,
+    [keptRagRecordIdSet, ragRecords],
+  );
+  const ragTotalChunkCount = useMemo(
+    () =>
+      ragRecords.reduce(
+        (sum, record) =>
+          sum +
+          record.sourceFiles.reduce((innerSum, file) => innerSum + (file.chunkCount ?? 0), 0),
+        0,
+      ),
+    [ragRecords],
   );
   const chatMessages = useMemo(() => [...history].reverse(), [history]);
   const chatHistoryRef = useRef<HTMLDivElement | null>(null);
@@ -2187,6 +2797,173 @@ export default function Home() {
                   {busy ? "Uploading..." : "Upload Files and Generate Record"}
                 </button>
               </form>
+            </section>
+
+            <section className="shell-card p-5 sm:p-6">
+              <h3 className="text-xl font-semibold text-[#0f3a44]">RAG Retention Manager</h3>
+              <p className="mt-2 text-sm text-slate-600">
+                Load a patient RAG record set, mark what you want to keep, and delete the rest.
+                Deleting a record also removes its indexed vectors from RAG storage.
+              </p>
+
+              <div className="mt-4 grid gap-3">
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+                  <input
+                    className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
+                    placeholder="Patient ID (Mongo ObjectId)"
+                    value={ragRetentionPatientId}
+                    onChange={(event) => setRagRetentionPatientId(event.target.value)}
+                    list="known-patient-ids"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleLoadRagRecords()}
+                    disabled={busy || ragManagerBusy}
+                    className="rounded-xl bg-[#1a56a8] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#164b93] disabled:opacity-60"
+                  >
+                    {ragManagerBusy ? "Loading..." : "Load RAG Records"}
+                  </button>
+                </div>
+
+                {knownPatients.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const firstPatient = knownPatients[0];
+                      if (!firstPatient) {
+                        return;
+                      }
+
+                      setRagRetentionPatientId(firstPatient.id);
+                    }}
+                    className="w-fit rounded-lg border border-[#cfe2e2] bg-[#f6fbfb] px-3 py-2 text-xs font-semibold text-[#15414d]"
+                  >
+                    Use first remembered patient ID
+                  </button>
+                )}
+
+                {ragRecords.length === 0 ? (
+                  <p className="text-sm text-slate-500">
+                    No loaded RAG records yet. Provide a patient ID and load records first.
+                  </p>
+                ) : (
+                  <div className="rounded-xl border border-[#d6e6e6] bg-white p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="pill bg-[#eef7ff] text-[#1a56a8]">
+                        {ragRecords.length} loaded
+                      </span>
+                      <span className="pill bg-[#ecfdf3] text-[#176742]">
+                        {keptRagRecordIds.length} marked keep
+                      </span>
+                      <span className="pill bg-[#fff4e8] text-[#9a4f00]">
+                        {ragRecordsMarkedForDeletion} marked delete
+                      </span>
+                      <span className="pill bg-[#f8fafb] text-slate-600">
+                        {ragTotalChunkCount} indexed chunks
+                      </span>
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setKeptRagRecordIds(ragRecords.map((record) => record.id))}
+                        className="rounded-lg border border-[#cfe2e2] bg-white px-3 py-2 text-xs font-semibold text-[#15414d]"
+                      >
+                        Keep all
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setKeptRagRecordIds([])}
+                        className="rounded-lg border border-[#e7d8b4] bg-[#fff9ec] px-3 py-2 text-xs font-semibold text-[#7a4f07]"
+                      >
+                        Mark all for delete
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteUncheckedRagRecords()}
+                        disabled={busy || ragManagerBusy || ragRecordsMarkedForDeletion === 0}
+                        className="rounded-lg bg-[#9b1c1c] px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                      >
+                        Delete unchecked (keep checked)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteCheckedRagRecords()}
+                        disabled={busy || ragManagerBusy || keptRagRecordIds.length === 0}
+                        className="rounded-lg border border-[#ecc7c7] bg-[#fff2f2] px-3 py-2 text-xs font-semibold text-[#9b1c1c] disabled:opacity-60"
+                      >
+                        Delete checked
+                      </button>
+                    </div>
+
+                    <div className="mt-3 max-h-[380px] space-y-2 overflow-y-auto pr-1">
+                      {ragRecords.map((record) => (
+                        <article
+                          key={record.id}
+                          className="rounded-xl border border-[#d8e8e8] bg-[#fbfefe] p-3"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <label className="inline-flex items-center gap-2 text-sm font-semibold text-[#15414d]">
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4 rounded border-[#accaca]"
+                                checked={keptRagRecordIdSet.has(record.id)}
+                                onChange={() => handleToggleKeptRagRecord(record.id)}
+                              />
+                              Keep this record
+                            </label>
+
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyId(record.id)}
+                              className="code-text rounded-lg border border-[#cfe2e2] px-2 py-1 text-[11px] text-[#1a56a8]"
+                            >
+                              copy id
+                            </button>
+                          </div>
+
+                          <p className="mt-2 text-sm font-semibold text-[#11333f]">
+                            {record.title ?? "Untitled RAG record"}
+                          </p>
+                          <p className="code-text mt-1 text-[11px] text-[#1a56a8]">{record.id}</p>
+
+                          <p className="mt-1 text-xs text-slate-600">
+                            Created: {record.createdAt ? formatDateTime(record.createdAt) : "unknown"}
+                            {record.provider ? ` | Provider: ${record.provider}` : ""}
+                          </p>
+
+                          {record.sourceFiles.length > 0 ? (
+                            <p className="mt-1 text-xs text-slate-600">
+                              Files: {record.sourceFiles
+                                .map((file) =>
+                                  `${file.fileName}${
+                                    file.chunkCount !== null ? ` (${file.chunkCount} chunks)` : ""
+                                  }`,
+                                )
+                                .join(" | ")}
+                            </p>
+                          ) : (
+                            <p className="mt-1 text-xs text-slate-500">
+                              No uploaded file chunk metadata on this record.
+                            </p>
+                          )}
+
+                          {record.prompt && (
+                            <details className="mt-2">
+                              <summary className="cursor-pointer text-xs text-[#1a56a8]">
+                                Prompt preview
+                              </summary>
+                              <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-700">
+                                {truncateText(record.prompt, 320)}
+                              </p>
+                            </details>
+                          )}
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </section>
 
             {pendingAction && (

@@ -8,7 +8,7 @@ export type LLMProvider = "gemini" | "groq";
 export interface LLMResponse {
   provider: LLMProvider;
   text: string;
-}
+} 
 
 export interface LLMGenerateOptions {
   retriesPerProvider?: number;

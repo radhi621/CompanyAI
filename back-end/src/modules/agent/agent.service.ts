@@ -22,6 +22,12 @@ import {
 const MAX_PLANNER_OUTPUT_CHARS = 60_000;
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const OBJECT_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
+const OBJECT_ID_GLOBAL_PATTERN = /[a-fA-F0-9]{24}/g;
+const PATIENT_ID_HINT_PATTERNS = [
+  /-\s*patient:[^\n\r]*?\bid\s*=\s*([a-fA-F0-9]{24})/gi,
+  /\bpatientId\b\s*[:=]?\s*([a-fA-F0-9]{24})/gi,
+  /\bpatient\b[^\n\r]{0,80}?\b([a-fA-F0-9]{24})\b/gi,
+];
 
 const plannerToolCallSchema = z
   .object({
@@ -65,17 +71,11 @@ interface PlannerOutcome {
   fallbackUsed: boolean;
 }
 
-const RECORD_QUERY_HINTS = [
-  /\bmedication(s)?\b/i,
-  /\bmedicine(s)?\b/i,
-  /\bdrug(s)?\b/i,
-  /\ballerg(y|ies)\b/i,
-  /\bdiagnos(is|es)\b/i,
-  /\bcondition(s)?\b/i,
-  /\btreatment(s)?\b/i,
-  /\bprescription(s)?\b/i,
-  /\bwhat\b.*\btak(e|es|ing)\b/i,
-];
+interface ExecutedToolResult {
+  tool: AgentToolName;
+  args: Record<string, unknown>;
+  result: unknown;
+}
 
 function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -208,6 +208,8 @@ function buildPlannerPrompt(actor: AuthUser, prompt: string, maxToolCalls: numbe
     "You are an orchestration planner for MediAssist IA.",
     `Requester role: ${actor.role}`,
     "Plan tool calls using only allowed tools for the request.",
+    "Interpret user intent semantically; do not rely on rigid keyword shortcuts or canned question templates.",
+    "For informational questions about patient state/history/findings, prefer retrieval tools when patient context can be resolved.",
     `Limit planned tool calls to at most ${maxToolCalls}.`,
     "Return only a JSON object with this exact shape:",
     '{"thought":"optional","toolCalls":[{"tool":"...","args":{},"reason":"optional"}],"finalMessage":"optional"}',
@@ -252,6 +254,7 @@ function buildNoToolFallbackPrompt(actor: AuthUser, prompt: string): string {
     "You are MediAssist IA.",
     `Requester role: ${actor.role}`,
     "Provide a concise and safe response without performing any database-modifying action.",
+    "If evidence is insufficient, clearly say what patient context is missing and ask for one clarifying detail.",
     "Do not imply that actions were executed.",
     "Respond in plain text only.",
     "User request:",
@@ -270,28 +273,16 @@ function toToolCalls(
   }));
 }
 
-function shouldAutoChainRecordSearch(
-  prompt: string,
-  calls: IAgentToolCall[],
-  maxToolCalls: number,
-): boolean {
-  if (calls.length >= maxToolCalls + 1) {
-    return false;
-  }
-
-  const hasPatientSearch = calls.some((call) => call.tool === "search_patient");
+function shouldAutoChainRecordSearch(prompt: string, calls: IAgentToolCall[]): boolean {
   const hasRecordSearch = calls.some((call) => call.tool === "search_medical_records_RAG");
+  const hasDestructiveTool = calls.some((call) => isToolDestructive(call.tool));
+  const isInsertModePrompt = /\bmode:\s*insert\b/i.test(prompt);
 
-  if (!hasPatientSearch || hasRecordSearch) {
+  if (hasRecordSearch || hasDestructiveTool || isInsertModePrompt) {
     return false;
   }
 
-  const normalizedPrompt = prompt.trim();
-  if (!normalizedPrompt) {
-    return false;
-  }
-
-  return RECORD_QUERY_HINTS.some((pattern) => pattern.test(normalizedPrompt));
+  return true;
 }
 
 function normalizePatientId(value: unknown): string | null {
@@ -305,6 +296,44 @@ function normalizePatientId(value: unknown): string | null {
   }
 
   return null;
+}
+
+function collectObjectIdMatches(value: string, pattern: RegExp, captureIndex = 0): string[] {
+  const patternWithGlobalFlag = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const matcher = new RegExp(pattern.source, patternWithGlobalFlag);
+  const matches: string[] = [];
+  let current: RegExpExecArray | null;
+
+  while ((current = matcher.exec(value)) !== null) {
+    const rawCandidate = captureIndex === 0 ? current[0] : current[captureIndex];
+    const normalized = normalizePatientId(rawCandidate);
+    if (normalized) {
+      matches.push(normalized);
+    }
+  }
+
+  return matches;
+}
+
+function extractPatientIdCandidatesFromPrompt(prompt: string): string[] {
+  const normalizedPrompt = prompt.trim();
+  if (!normalizedPrompt) {
+    return [];
+  }
+
+  const contextualMatches = PATIENT_ID_HINT_PATTERNS.flatMap((pattern) =>
+    collectObjectIdMatches(normalizedPrompt, pattern, 1),
+  );
+  if (contextualMatches.length > 0) {
+    return Array.from(new Set(contextualMatches));
+  }
+
+  const fallbackMatches = collectObjectIdMatches(normalizedPrompt, OBJECT_ID_GLOBAL_PATTERN);
+  if (fallbackMatches.length === 1 && /\bpatient\b/i.test(normalizedPrompt)) {
+    return fallbackMatches;
+  }
+
+  return [];
 }
 
 function extractSinglePatientIdFromSearchResult(result: unknown): string | null {
@@ -326,6 +355,83 @@ function extractSinglePatientIdFromSearchResult(result: unknown): string | null 
   }
 
   return normalizePatientId(payload.patients[0]?._id);
+}
+
+function extractPatientIdFromToolResult(result: unknown): string | null {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return null;
+  }
+
+  const payload = result as Record<string, unknown>;
+  const directPatientId = normalizePatientId(payload.patientId);
+  if (directPatientId) {
+    return directPatientId;
+  }
+
+  const patientObject = payload.patient;
+  if (patientObject && typeof patientObject === "object" && !Array.isArray(patientObject)) {
+    const nestedPatientId = normalizePatientId((patientObject as Record<string, unknown>)._id);
+    if (nestedPatientId) {
+      return nestedPatientId;
+    }
+  }
+
+  return null;
+}
+
+function resolvePatientIdFromExecutionResults(results: ExecutedToolResult[]): string | null {
+  for (let index = results.length - 1; index >= 0; index -= 1) {
+    const entry = results[index];
+
+    if (entry.tool === "search_patient") {
+      const fromSearchResult = extractSinglePatientIdFromSearchResult(entry.result);
+      if (fromSearchResult) {
+        return fromSearchResult;
+      }
+    }
+
+    const fromArgs = normalizePatientId(entry.args?.patientId);
+    if (fromArgs) {
+      return fromArgs;
+    }
+
+    const fromResult = extractPatientIdFromToolResult(entry.result);
+    if (fromResult) {
+      return fromResult;
+    }
+  }
+
+  return null;
+}
+
+function resolvePatientIdFromCalls(calls: IAgentToolCall[]): string | null {
+  for (const call of calls) {
+    const candidate = normalizePatientId(call.args?.patientId);
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function resolvePatientIdForAutoRecordSearch(
+  prompt: string,
+  calls: IAgentToolCall[],
+  executionResults: ExecutedToolResult[],
+): string | null {
+  const fromResults = resolvePatientIdFromExecutionResults(executionResults);
+  if (fromResults) {
+    return fromResults;
+  }
+
+  const fromCalls = resolvePatientIdFromCalls(calls);
+  if (fromCalls) {
+    return fromCalls;
+  }
+
+  const fromPrompt = extractPatientIdCandidatesFromPrompt(prompt);
+  return fromPrompt[0] ?? null;
 }
 
 function extractUserQueryFromPrompt(prompt: string): string {
@@ -358,7 +464,7 @@ function extractUserQueryFromPrompt(prompt: string): string {
   return trimmed;
 }
 
-function buildAutoRecordSearchCall(patientId: string, prompt: string): IAgentToolCall {
+function buildAutoRecordSearchCall(patientId: string, prompt: string, reason?: string): IAgentToolCall {
   const query = extractUserQueryFromPrompt(prompt).slice(0, 2000);
 
   return {
@@ -368,7 +474,9 @@ function buildAutoRecordSearchCall(patientId: string, prompt: string): IAgentToo
       query,
       limit: 5,
     },
-    reason: "Auto-chained after a single patient match for a record-oriented question",
+    reason:
+      reason ??
+      "Auto-chained medical-record retrieval using available patient context for an open-ended request",
   };
 }
 
@@ -507,24 +615,11 @@ async function executeCalls(
   actor: AuthUser,
   prompt: string,
   calls: IAgentToolCall[],
-): Promise<Array<{ tool: AgentToolName; args: Record<string, unknown>; result: unknown }>> {
-  const results: Array<{ tool: AgentToolName; args: Record<string, unknown>; result: unknown }> = [];
+): Promise<ExecutedToolResult[]> {
+  const results: ExecutedToolResult[] = [];
 
-  const resolvePatientIdFromExecutedResults = (): string | null => {
-    for (let index = results.length - 1; index >= 0; index -= 1) {
-      const entry = results[index];
-      if (entry.tool !== "search_patient") {
-        continue;
-      }
-
-      const resolved = extractSinglePatientIdFromSearchResult(entry.result);
-      if (resolved) {
-        return resolved;
-      }
-    }
-
-    return null;
-  };
+  const resolvePatientIdFromExecutedResults = (): string | null =>
+    resolvePatientIdFromExecutionResults(results);
 
   for (const call of calls) {
     let effectiveCall = call;
@@ -627,24 +722,64 @@ export const agentService = {
         planner.parsed.toolCalls as IAgentToolCall[],
       );
       if (calls.length === 0) {
+        const executionResults: ExecutedToolResult[] = [];
+        const autoChainedToolCalls: IAgentToolCall[] = [];
+        let autoRetrievalError: string | null = null;
+
+        if (shouldAutoChainRecordSearch(input.prompt, calls)) {
+          const resolvedPatientId = resolvePatientIdForAutoRecordSearch(input.prompt, calls, executionResults);
+          if (resolvedPatientId) {
+            const autoCall = buildAutoRecordSearchCall(
+              resolvedPatientId,
+              input.prompt,
+              "Automatic retrieval because planner returned no explicit tool calls",
+            );
+
+            try {
+              const autoResult = await executeToolCall(autoCall, { actor: input.actor });
+
+              executionResults.push({
+                tool: autoCall.tool,
+                args: autoCall.args,
+                result: autoResult,
+              });
+
+              autoChainedToolCalls.push(autoCall);
+            } catch (error) {
+              autoRetrievalError = extractErrorMessage(error);
+            }
+          }
+        }
+
         await AgentAuditLogModel.create({
           actorId: new Types.ObjectId(input.actor.id),
           actorRole: input.actor.role,
           prompt: input.prompt,
           plannerResponse: planner.raw,
-          toolResults: [],
+          toolResults: executionResults,
           requiresConfirmation: false,
           success: true,
         });
+
+        const baseFinalMessage =
+          planner.parsed.finalMessage ??
+          "No direct tool execution was planned. Provide patient context for more precise retrieval when needed.";
+
+        const finalMessage =
+          autoChainedToolCalls.length > 0
+            ? "Planner returned no explicit tool calls, so an automatic medical-record retrieval was executed using available patient context. Review tool results for details."
+            : autoRetrievalError
+              ? `${baseFinalMessage} Automatic retrieval attempt failed: ${autoRetrievalError}.`
+              : baseFinalMessage;
 
         const responsePayload = {
           provider: planner.provider,
           requiresConfirmation: false,
           plannerFallbackUsed: planner.fallbackUsed,
-          finalMessage:
-            planner.parsed.finalMessage ??
-            "No tool execution was required for this request based on planner output.",
+          finalMessage,
           plannedToolCalls: [],
+          autoChainedToolCalls,
+          results: executionResults.length > 0 ? executionResults : undefined,
         };
 
         if (idempotencyRecordId) {
@@ -696,24 +831,35 @@ export const agentService = {
 
       const executionResults = await executeCalls(input.actor, input.prompt, calls);
       const autoChainedToolCalls: IAgentToolCall[] = [];
+      let autoRecordSearchError: string | null = null;
 
-      if (shouldAutoChainRecordSearch(input.prompt, calls, input.maxToolCalls)) {
-        const patientSearchResult = executionResults.find((item) => item.tool === "search_patient");
-        const resolvedPatientId = patientSearchResult
-          ? extractSinglePatientIdFromSearchResult(patientSearchResult.result)
-          : null;
+      if (shouldAutoChainRecordSearch(input.prompt, calls)) {
+        const resolvedPatientId = resolvePatientIdForAutoRecordSearch(
+          input.prompt,
+          calls,
+          executionResults,
+        );
 
         if (resolvedPatientId) {
-          const autoCall = buildAutoRecordSearchCall(resolvedPatientId, input.prompt);
-          const autoResult = await executeToolCall(autoCall, { actor: input.actor });
+          const autoCall = buildAutoRecordSearchCall(
+            resolvedPatientId,
+            input.prompt,
+            "Automatic retrieval added to answer an open-ended question with available patient context",
+          );
 
-          executionResults.push({
-            tool: autoCall.tool,
-            args: autoCall.args,
-            result: autoResult,
-          });
+          try {
+            const autoResult = await executeToolCall(autoCall, { actor: input.actor });
 
-          autoChainedToolCalls.push(autoCall);
+            executionResults.push({
+              tool: autoCall.tool,
+              args: autoCall.args,
+              result: autoResult,
+            });
+
+            autoChainedToolCalls.push(autoCall);
+          } catch (error) {
+            autoRecordSearchError = extractErrorMessage(error);
+          }
         }
       }
 
@@ -736,7 +882,12 @@ export const agentService = {
         results: executionResults,
         finalMessage:
           autoChainedToolCalls.length > 0
-            ? "Tools executed successfully, including an automatic follow-up medical records search after patient identification. Review tool results for details."
+            ? "Tools executed successfully, including an automatic medical-record retrieval based on available patient context. Review tool results for details."
+            : autoRecordSearchError
+              ? `${
+                  planner.parsed.finalMessage ??
+                  "Tools executed successfully. Review tool results for details."
+                } Automatic retrieval attempt failed: ${autoRecordSearchError}.`
             : planner.parsed.finalMessage ??
               "Tools executed successfully. Review tool results for details.",
       };
