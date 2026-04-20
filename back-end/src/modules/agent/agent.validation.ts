@@ -17,3 +17,14 @@ export const confirmPendingActionSchema = z.object({
     approved: z.boolean(),
   }),
 });
+
+export const listAgentHistorySchema = z.object({
+  query: z.object({
+    limit: z.coerce.number().int().positive().max(100).default(40),
+    includeFailures: z
+      .enum(["true", "false"])
+      .transform((value) => value === "true")
+      .optional(),
+    actorId: objectIdSchema.optional(),
+  }),
+});

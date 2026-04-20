@@ -54,6 +54,7 @@ interface ToolExecutionResultItem {
   tool: string;
   args?: unknown;
   result?: unknown;
+  error?: string;
 }
 
 interface AgentConfirmResult {
@@ -61,6 +62,17 @@ interface AgentConfirmResult {
   status: "rejected" | "executed";
   message: string;
   results?: unknown;
+}
+
+interface AgentHistoryEntry {
+  id: string;
+  prompt: string;
+  plannerResponse: string;
+  toolResults: ToolExecutionResultItem[];
+  requiresConfirmation: boolean;
+  success: boolean;
+  errorMessage?: string;
+  createdAt: string;
 }
 
 interface RAGSourceFileItem {
@@ -274,6 +286,71 @@ function parseToolExecutionItems(value: unknown): ToolExecutionResultItem[] {
       tool: candidate.tool,
       args: candidate.args,
       result: candidate.result,
+      error: typeof candidate.error === "string" ? candidate.error : undefined,
+    });
+  }
+
+  return items;
+}
+
+function extractUserRequestFromStoredPrompt(prompt: string): string {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const explicitRequestMarker = "current user request:";
+  const markerIndex = trimmed.toLowerCase().lastIndexOf(explicitRequestMarker);
+  if (markerIndex !== -1) {
+    const candidate = trimmed.slice(markerIndex + explicitRequestMarker.length).trim();
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  const ignoredBlocks = new Set(["Conversation context from previous turns:", "Current user request:"]);
+  const blocks = trimmed
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .filter((block) => !block.startsWith("Mode:"))
+    .filter((block) => !ignoredBlocks.has(block));
+
+  return blocks.at(-1) ?? trimmed;
+}
+
+function parseAgentHistoryEntries(value: unknown): AgentHistoryEntry[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const items: AgentHistoryEntry[] = [];
+
+  for (const candidate of value) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+
+    const id =
+      (typeof candidate.id === "string" ? candidate.id.trim() : "") ||
+      (typeof candidate._id === "string" ? candidate._id.trim() : "");
+    const prompt = typeof candidate.prompt === "string" ? candidate.prompt : "";
+    const createdAt = typeof candidate.createdAt === "string" ? candidate.createdAt : "";
+
+    if (!id || !prompt || !createdAt) {
+      continue;
+    }
+
+    items.push({
+      id,
+      prompt,
+      plannerResponse:
+        typeof candidate.plannerResponse === "string" ? candidate.plannerResponse : "",
+      toolResults: parseToolExecutionItems(candidate.toolResults),
+      requiresConfirmation: Boolean(candidate.requiresConfirmation),
+      success: Boolean(candidate.success),
+      errorMessage: typeof candidate.errorMessage === "string" ? candidate.errorMessage : undefined,
+      createdAt,
     });
   }
 
@@ -1452,6 +1529,86 @@ export default function Home() {
     [clearSession, token],
   );
 
+  const loadPersistentHistory = useCallback(async () => {
+    const rawEntries = await apiRequest<unknown[]>("/agent/history?limit=40&includeFailures=true");
+    const entries = parseAgentHistoryEntries(rawEntries);
+    if (entries.length === 0) {
+      return;
+    }
+
+    const hydratedHistory: HistoryItem[] = [];
+    const memoryPayloads: unknown[] = [];
+
+    entries.forEach((entry, index) => {
+      const promptText = extractUserRequestFromStoredPrompt(entry.prompt);
+      const parsedTimestamp = new Date(entry.createdAt).getTime();
+      const createdAt =
+        Number.isFinite(parsedTimestamp) && !Number.isNaN(parsedTimestamp)
+          ? parsedTimestamp
+          : Date.now() - index * 2;
+
+      const promptTitle = /\bmode:\s*insert\b/i.test(entry.prompt)
+        ? "Saved insert command"
+        : "Saved fetch command";
+
+      hydratedHistory.push({
+        id: `persist:prompt:${entry.id}`,
+        kind: "prompt",
+        title: promptTitle,
+        text: promptText || truncateText(normalizeSummaryText(entry.prompt), 700),
+        createdAt: createdAt - 1,
+      });
+
+      const payloadForHistory: AgentExecutionResult = {
+        requiresConfirmation: entry.requiresConfirmation,
+        results: entry.toolResults.map((item) => ({
+          tool: item.tool,
+          args: isRecord(item.args) ? item.args : {},
+          result: item.result,
+        })),
+        finalMessage: entry.errorMessage,
+      };
+
+      memoryPayloads.push(payloadForHistory);
+
+      const formattedConversationText = entry.success
+        ? formatConversationResultText(payloadForHistory, promptText)
+        : null;
+
+      const fallbackSuccessText =
+        (toOptionalString(entry.plannerResponse) ?? "Saved execution result.") +
+        ` Tool calls: ${entry.toolResults.length}.`;
+
+      hydratedHistory.push({
+        id: `persist:result:${entry.id}`,
+        kind: entry.success ? "result" : "system",
+        title: entry.success ? "Saved execution result" : "Saved execution error",
+        text:
+          formattedConversationText ??
+          entry.errorMessage ??
+          (entry.success ? fallbackSuccessText : "Saved execution failed."),
+        payload: payloadForHistory,
+        createdAt,
+      });
+    });
+
+    hydratedHistory.sort((left, right) => right.createdAt - left.createdAt);
+
+    setHistory((current) =>
+      current.length > 0 ? current : hydratedHistory.slice(0, MAX_HISTORY_ITEMS),
+    );
+
+    const extractedEntities = dedupeEntityRefs(
+      memoryPayloads.flatMap((payload) => extractEntityRefs(payload)),
+    ).slice(0, MAX_ENTITY_MEMORY);
+
+    if (extractedEntities.length > 0) {
+      setEntityMemory((current) => (current.length > 0 ? current : extractedEntities));
+    }
+
+    showFeedback("info", `Loaded ${entries.length} persisted history record(s).`);
+  }, [apiRequest, showFeedback]);
+
   const loadCurrentUser = useCallback(async () => {
     if (!token) {
       return;
@@ -1460,11 +1617,20 @@ export default function Home() {
     try {
       const user = await apiRequest<AuthUser>("/auth/me");
       setCurrentUser(user);
+
+      try {
+        await loadPersistentHistory();
+      } catch (historyError) {
+        showFeedback(
+          "error",
+          `Unable to load persisted history: ${extractErrorMessage(historyError)}`,
+        );
+      }
     } catch (error) {
       clearSession();
       showFeedback("error", extractErrorMessage(error));
     }
-  }, [apiRequest, clearSession, showFeedback, token]);
+  }, [apiRequest, clearSession, loadPersistentHistory, showFeedback, token]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2439,6 +2605,14 @@ export default function Home() {
                       className="rounded-lg border border-[#ecc7c7] bg-[#fff2f2] px-3 py-2 text-xs font-semibold text-[#9b1c1c]"
                     >
                       Clear conversation
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void loadPersistentHistory()}
+                      disabled={busy}
+                      className="rounded-lg border border-[#cfe2e2] bg-white px-3 py-2 text-xs font-semibold text-[#15414d] disabled:opacity-60"
+                    >
+                      Load persisted history
                     </button>
                   </div>
 
