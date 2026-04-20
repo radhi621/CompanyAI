@@ -170,6 +170,8 @@ Agent reliability notes:
 
 Implemented tools:
 
+- create_patient
+- list_patients
 - search_patient
 - get_patient_summary
 - list_appointments

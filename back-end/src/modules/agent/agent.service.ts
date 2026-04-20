@@ -1,5 +1,5 @@
 import { Types } from "mongoose";
-import { z } from "zod";
+import { ZodError, z } from "zod";
 import { env } from "../../config/env";
 import { AgentAuditLogModel } from "../../models/AgentAuditLog";
 import {
@@ -21,6 +21,7 @@ import {
 
 const MAX_PLANNER_OUTPUT_CHARS = 60_000;
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const OBJECT_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
 
 const plannerToolCallSchema = z
   .object({
@@ -63,6 +64,18 @@ interface PlannerOutcome {
   parsed: z.infer<typeof plannerResponseSchema>;
   fallbackUsed: boolean;
 }
+
+const RECORD_QUERY_HINTS = [
+  /\bmedication(s)?\b/i,
+  /\bmedicine(s)?\b/i,
+  /\bdrug(s)?\b/i,
+  /\ballerg(y|ies)\b/i,
+  /\bdiagnos(is|es)\b/i,
+  /\bcondition(s)?\b/i,
+  /\btreatment(s)?\b/i,
+  /\bprescription(s)?\b/i,
+  /\bwhat\b.*\btak(e|es|ing)\b/i,
+];
 
 function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -199,6 +212,8 @@ function buildPlannerPrompt(actor: AuthUser, prompt: string, maxToolCalls: numbe
     "Return only a JSON object with this exact shape:",
     '{"thought":"optional","toolCalls":[{"tool":"...","args":{},"reason":"optional"}],"finalMessage":"optional"}',
     "Do not wrap JSON in markdown.",
+    "Never use symbolic placeholders in args (for example: @search_patient.output.patientId, <PATIENT_ID>, <DOCTOR_ID>).",
+    "If an ID is unknown, plan only the discovery call first (for example search_patient) and let the system continue.",
     "Available tools:",
     toolCatalog,
     "User request:",
@@ -223,6 +238,7 @@ function buildPlannerRepairPrompt(
     "Fix the output and return only valid JSON with exact shape:",
     '{"thought":"optional","toolCalls":[{"tool":"...","args":{},"reason":"optional"}],"finalMessage":"optional"}',
     "Do not use markdown fences.",
+    "Never use symbolic placeholders in args (for example: @search_patient.output.patientId, <PATIENT_ID>, <DOCTOR_ID>).",
     `Previous parse issue: ${parseErrorMessage}`,
     "Allowed tool catalog:",
     toolCatalog,
@@ -252,6 +268,163 @@ function toToolCalls(
     args: call.args,
     reason: call.reason,
   }));
+}
+
+function shouldAutoChainRecordSearch(
+  prompt: string,
+  calls: IAgentToolCall[],
+  maxToolCalls: number,
+): boolean {
+  if (calls.length >= maxToolCalls + 1) {
+    return false;
+  }
+
+  const hasPatientSearch = calls.some((call) => call.tool === "search_patient");
+  const hasRecordSearch = calls.some((call) => call.tool === "search_medical_records_RAG");
+
+  if (!hasPatientSearch || hasRecordSearch) {
+    return false;
+  }
+
+  const normalizedPrompt = prompt.trim();
+  if (!normalizedPrompt) {
+    return false;
+  }
+
+  return RECORD_QUERY_HINTS.some((pattern) => pattern.test(normalizedPrompt));
+}
+
+function normalizePatientId(value: unknown): string | null {
+  if (typeof value === "string") {
+    return /^[a-fA-F0-9]{24}$/.test(value) ? value : null;
+  }
+
+  if (value && typeof value === "object" && "toString" in value) {
+    const stringified = (value as { toString: () => string }).toString();
+    return /^[a-fA-F0-9]{24}$/.test(stringified) ? stringified : null;
+  }
+
+  return null;
+}
+
+function extractSinglePatientIdFromSearchResult(result: unknown): string | null {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+
+  const payload = result as {
+    total?: unknown;
+    patients?: Array<Record<string, unknown>>;
+  };
+
+  if (!Array.isArray(payload.patients) || payload.patients.length !== 1) {
+    return null;
+  }
+
+  if (typeof payload.total === "number" && payload.total !== 1) {
+    return null;
+  }
+
+  return normalizePatientId(payload.patients[0]?._id);
+}
+
+function extractUserQueryFromPrompt(prompt: string): string {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const explicitRequestMarker = "current user request:";
+  const markerIndex = trimmed.toLowerCase().lastIndexOf(explicitRequestMarker);
+  if (markerIndex !== -1) {
+    const candidate = trimmed.slice(markerIndex + explicitRequestMarker.length).trim();
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  const ignoredBlocks = new Set(["Conversation context from previous turns:", "Current user request:"]);
+  const blocks = trimmed
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .filter((block) => !block.startsWith("Mode:"))
+    .filter((block) => !ignoredBlocks.has(block));
+
+  if (blocks.length > 0) {
+    return blocks[blocks.length - 1];
+  }
+
+  return trimmed;
+}
+
+function buildAutoRecordSearchCall(patientId: string, prompt: string): IAgentToolCall {
+  const query = extractUserQueryFromPrompt(prompt).slice(0, 2000);
+
+  return {
+    tool: "search_medical_records_RAG",
+    args: {
+      patientId,
+      query,
+      limit: 5,
+    },
+    reason: "Auto-chained after a single patient match for a record-oriented question",
+  };
+}
+
+function normalizeToolLimit(value: unknown, fallback = 5): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+
+  return Math.max(1, Math.min(10, Math.trunc(numeric)));
+}
+
+function normalizeRecordSearchQuery(value: unknown, promptFallback: string): string {
+  const raw = typeof value === "string" ? value : promptFallback;
+  const extracted = extractUserQueryFromPrompt(raw).trim();
+  if (!extracted) {
+    return "patient medical records";
+  }
+
+  return extracted.slice(0, 2000);
+}
+
+function normalizePlannedToolCalls(prompt: string, calls: IAgentToolCall[]): IAgentToolCall[] {
+  const hasPatientSearch = calls.some((call) => call.tool === "search_patient");
+
+  return calls.flatMap((call) => {
+    if (call.tool !== "search_medical_records_RAG") {
+      return [call];
+    }
+
+    const query = normalizeRecordSearchQuery(call.args?.query, prompt);
+    const patientId = normalizePatientId(call.args?.patientId);
+
+    if (!patientId && hasPatientSearch) {
+      return [];
+    }
+
+    if (!patientId || !OBJECT_ID_PATTERN.test(patientId)) {
+      throw new ApiError(400, "search_medical_records_RAG requires a valid patientId", {
+        tool: call.tool,
+        args: call.args,
+      });
+    }
+
+    return [
+      {
+        ...call,
+        args: {
+          ...call.args,
+          patientId,
+          query,
+          limit: normalizeToolLimit(call.args?.limit, 5),
+        },
+      },
+    ];
+  });
 }
 
 function assertRolePermissionForCalls(actor: AuthUser, calls: IAgentToolCall[]): void {
@@ -332,26 +505,89 @@ async function planToolCalls(
 
 async function executeCalls(
   actor: AuthUser,
+  prompt: string,
   calls: IAgentToolCall[],
 ): Promise<Array<{ tool: AgentToolName; args: Record<string, unknown>; result: unknown }>> {
   const results: Array<{ tool: AgentToolName; args: Record<string, unknown>; result: unknown }> = [];
 
+  const resolvePatientIdFromExecutedResults = (): string | null => {
+    for (let index = results.length - 1; index >= 0; index -= 1) {
+      const entry = results[index];
+      if (entry.tool !== "search_patient") {
+        continue;
+      }
+
+      const resolved = extractSinglePatientIdFromSearchResult(entry.result);
+      if (resolved) {
+        return resolved;
+      }
+    }
+
+    return null;
+  };
+
   for (const call of calls) {
+    let effectiveCall = call;
+
+    if (call.tool === "search_medical_records_RAG") {
+      const resolvedPatientId = normalizePatientId(call.args?.patientId) ?? resolvePatientIdFromExecutedResults();
+      if (resolvedPatientId) {
+        effectiveCall = {
+          ...call,
+          args: {
+            ...call.args,
+            patientId: resolvedPatientId,
+            query: normalizeRecordSearchQuery(call.args?.query, prompt),
+            limit: normalizeToolLimit(call.args?.limit, 5),
+          },
+        };
+      }
+    } else if ("patientId" in (call.args ?? {})) {
+      const currentPatientId = normalizePatientId(call.args?.patientId);
+      const resolvedPatientId = currentPatientId ?? resolvePatientIdFromExecutedResults();
+
+      if (resolvedPatientId && resolvedPatientId !== currentPatientId) {
+        effectiveCall = {
+          ...call,
+          args: {
+            ...call.args,
+            patientId: resolvedPatientId,
+          },
+        };
+      }
+    }
+
     let result: unknown;
 
     try {
-      result = await executeToolCall(call, { actor });
+      result = await executeToolCall(effectiveCall, { actor });
     } catch (error) {
-      throw new ApiError(500, `Tool execution failed: ${call.tool}`, {
-        tool: call.tool,
-        args: call.args,
+      if (error instanceof ApiError) {
+        throw new ApiError(error.statusCode, error.message, {
+          tool: effectiveCall.tool,
+          args: effectiveCall.args,
+          details: error.details,
+        });
+      }
+
+      if (error instanceof ZodError) {
+        throw new ApiError(400, `Invalid args for tool ${effectiveCall.tool}`, {
+          tool: effectiveCall.tool,
+          args: effectiveCall.args,
+          issues: error.flatten(),
+        });
+      }
+
+      throw new ApiError(500, `Tool execution failed: ${effectiveCall.tool}`, {
+        tool: effectiveCall.tool,
+        args: effectiveCall.args,
         error: extractErrorMessage(error),
       });
     }
 
     results.push({
-      tool: call.tool,
-      args: call.args,
+      tool: effectiveCall.tool,
+      args: effectiveCall.args,
       result,
     });
   }
@@ -386,7 +622,10 @@ export const agentService = {
       const planner = await planToolCalls(input.actor, input.prompt, input.maxToolCalls);
       plannerRaw = planner.raw;
 
-      const calls = planner.parsed.toolCalls as IAgentToolCall[];
+      const calls = normalizePlannedToolCalls(
+        input.prompt,
+        planner.parsed.toolCalls as IAgentToolCall[],
+      );
       if (calls.length === 0) {
         await AgentAuditLogModel.create({
           actorId: new Types.ObjectId(input.actor.id),
@@ -455,7 +694,28 @@ export const agentService = {
         return responsePayload;
       }
 
-      const executionResults = await executeCalls(input.actor, calls);
+      const executionResults = await executeCalls(input.actor, input.prompt, calls);
+      const autoChainedToolCalls: IAgentToolCall[] = [];
+
+      if (shouldAutoChainRecordSearch(input.prompt, calls, input.maxToolCalls)) {
+        const patientSearchResult = executionResults.find((item) => item.tool === "search_patient");
+        const resolvedPatientId = patientSearchResult
+          ? extractSinglePatientIdFromSearchResult(patientSearchResult.result)
+          : null;
+
+        if (resolvedPatientId) {
+          const autoCall = buildAutoRecordSearchCall(resolvedPatientId, input.prompt);
+          const autoResult = await executeToolCall(autoCall, { actor: input.actor });
+
+          executionResults.push({
+            tool: autoCall.tool,
+            args: autoCall.args,
+            result: autoResult,
+          });
+
+          autoChainedToolCalls.push(autoCall);
+        }
+      }
 
       await AgentAuditLogModel.create({
         actorId: new Types.ObjectId(input.actor.id),
@@ -472,9 +732,13 @@ export const agentService = {
         requiresConfirmation: false,
         plannerFallbackUsed: planner.fallbackUsed,
         plannedToolCalls: calls,
+        autoChainedToolCalls,
         results: executionResults,
         finalMessage:
-          planner.parsed.finalMessage ?? "Tools executed successfully. Review tool results for details.",
+          autoChainedToolCalls.length > 0
+            ? "Tools executed successfully, including an automatic follow-up medical records search after patient identification. Review tool results for details."
+            : planner.parsed.finalMessage ??
+              "Tools executed successfully. Review tool results for details.",
       };
 
       if (idempotencyRecordId) {
@@ -570,7 +834,7 @@ export const agentService = {
       pending.approvedAt = new Date();
       await pending.save();
 
-      const executionResults = await executeCalls(input.actor, pending.toolCalls);
+      const executionResults = await executeCalls(input.actor, pending.prompt, pending.toolCalls);
 
       pending.status = "executed";
       pending.executedAt = new Date();

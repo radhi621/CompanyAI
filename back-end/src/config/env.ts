@@ -23,7 +23,7 @@ const envSchema = z.object({
 
   GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required"),
   GEMINI_MODEL: z.string().default("gemini-2.5-flash"),
-  GEMINI_EMBEDDING_MODEL: z.string().default("text-embedding-004"),
+  GEMINI_EMBEDDING_MODEL: z.string().default("gemini-embedding-001"),
 
   GROQ_API_KEY: z.string().min(1, "GROQ_API_KEY is required"),
   GROQ_MODEL: z.string().default("llama-3.3-70b-versatile"),

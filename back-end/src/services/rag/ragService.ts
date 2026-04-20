@@ -3,6 +3,7 @@ import type { IAIContextChunk, IAIRecordDocument } from "../../models/AIRecord";
 import { geminiClient } from "../llm/geminiClient";
 import { ensureQdrantCollection, qdrantClient } from "./qdrantClient";
 import type { ParsedDocument } from "../files/documentParser";
+import { ApiError } from "../../utils/apiError";
 
 const MAX_EMBEDDING_TEXT_CHARS = 6000;
 const UPLOAD_CHUNK_SIZE = 1400;
@@ -59,24 +60,44 @@ function normalizePointId(pointId: unknown): string {
   return "unknown-id";
 }
 
+function unknownErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
 export const ragService = {
   async retrieveContext(patientId: string, query: string, limit = 3): Promise<IAIContextChunk[]> {
-    await ensureQdrantCollection();
-    const queryVector = await geminiClient.embedText(query);
+    let results: Awaited<ReturnType<typeof qdrantClient.search>>;
 
-    const results = await qdrantClient.search(env.QDRANT_COLLECTION, {
-      vector: queryVector,
-      limit,
-      with_payload: true,
-      filter: {
-        must: [
-          {
-            key: "patientId",
-            match: { value: patientId },
-          },
-        ],
-      },
-    });
+    try {
+      await ensureQdrantCollection();
+      const queryVector = await geminiClient.embedText(query);
+
+      results = await qdrantClient.search(env.QDRANT_COLLECTION, {
+        vector: queryVector,
+        limit,
+        with_payload: true,
+        filter: {
+          must: [
+            {
+              key: "patientId",
+              match: { value: patientId },
+            },
+          ],
+        },
+      });
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+
+      throw new ApiError(502, `RAG retrieval failed: ${unknownErrorMessage(error)}`, {
+        collection: env.QDRANT_COLLECTION,
+      });
+    }
 
     return results
       .map((item) => {

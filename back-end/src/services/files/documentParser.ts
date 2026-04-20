@@ -130,6 +130,14 @@ function parseTextLike(buffer: Buffer): string {
   return buffer.toString("utf8");
 }
 
+function unknownErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
 async function parseByExtension(extension: string, buffer: Buffer): Promise<string> {
   switch (extension) {
     case ".pdf":
@@ -160,7 +168,26 @@ export const parseUploadedDocuments = async (
 
   for (const file of files) {
     const extension = assertSupportedFormat(file.originalname, file.mimetype);
-    const parsedText = await parseByExtension(extension, file.buffer);
+    let parsedText = "";
+
+    try {
+      parsedText = await parseByExtension(extension, file.buffer);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+
+      const parserHint =
+        extension === ".doc"
+          ? " Legacy .doc extraction can fail for some files; try converting to .docx or pdf."
+          : "";
+
+      throw new ApiError(
+        400,
+        `Failed to parse ${file.originalname}: ${unknownErrorMessage(error)}.${parserHint}`,
+      );
+    }
+
     const normalized = normalizeText(parsedText);
 
     if (!normalized) {

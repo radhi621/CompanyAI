@@ -17,6 +17,7 @@ import { ApiError } from "../../utils/apiError";
 import { createUser as createUserAccount } from "../auth/auth.service";
 import { appointmentsService } from "../appointments/appointments.service";
 import { doctorsService } from "../doctors/doctors.service";
+import { patientsService } from "../patients/patients.service";
 import { ragService } from "../../services/rag/ragService";
 
 interface AgentToolContext {
@@ -75,6 +76,43 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function extractSearchTerms(query: string): string[] {
+  return Array.from(
+    new Set(
+      query
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .map((term) => term.trim())
+        .filter((term) => term.length >= 3),
+    ),
+  );
+}
+
+function scoreTextMatch(text: string, terms: string[]): number {
+  if (!text || terms.length === 0) {
+    return 0;
+  }
+
+  const lowered = text.toLowerCase();
+  let matched = 0;
+
+  for (const term of terms) {
+    if (lowered.includes(term)) {
+      matched += 1;
+    }
+  }
+
+  return matched / terms.length;
+}
+
+function truncateResultContent(value: string, maxLength = 1400): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
 function parseLocalDateTime(date: string, time: string): DateTime {
   const dateTime = DateTime.fromFormat(`${date} ${time}`, "yyyy-MM-dd HH:mm", {
     zone: env.APP_TIMEZONE,
@@ -116,6 +154,79 @@ async function getAccessiblePatientIds(actor: AuthUser): Promise<Types.ObjectId[
 }
 
 const toolRegistry = {
+  create_patient: defineTool({
+    description: "Creates a patient profile in the medical department",
+    allowedRoles: ["admin", "secretary"],
+    destructive: false,
+    argsShape: {
+      firstName: "required string",
+      lastName: "required string",
+      cin: "required string",
+      phone: "optional string",
+      email: "optional email",
+      dateOfBirth: "optional date string",
+      pathologies: "optional array of strings",
+      assignedStaff: "optional array of MongoDB ObjectId",
+    },
+    argsSchema: z.object({
+      firstName: z.string().min(2),
+      lastName: z.string().min(2),
+      cin: z.string().min(4).max(20),
+      phone: z.string().min(5).max(30).optional(),
+      email: z.string().email().optional(),
+      dateOfBirth: z.coerce.date().optional(),
+      pathologies: z.array(z.string().min(2).max(100)).optional(),
+      assignedStaff: z.array(objectIdSchema).optional(),
+    }),
+    run: async (args, context) => {
+      const patient = await patientsService.create({
+        actor: context.actor,
+        firstName: args.firstName.trim(),
+        lastName: args.lastName.trim(),
+        cin: args.cin.trim(),
+        phone: args.phone?.trim(),
+        email: args.email?.trim().toLowerCase(),
+        dateOfBirth: args.dateOfBirth,
+        pathologies: args.pathologies,
+        assignedStaff: args.assignedStaff,
+      });
+
+      return {
+        patientId: patient._id.toString(),
+        firstName: patient.firstName,
+        lastName: patient.lastName,
+        cin: patient.cin,
+        phone: patient.phone ?? null,
+        email: patient.email ?? null,
+        pathologies: patient.pathologies,
+        assignedStaff: patient.assignedStaff.map((item) => item.toString()),
+      };
+    },
+  }),
+
+  list_patients: defineTool({
+    description: "Lists accessible patients for the requester",
+    allowedRoles: ["admin", "doctor", "nurse", "secretary"],
+    destructive: false,
+    argsShape: {
+      limit: "optional number max 100",
+    },
+    argsSchema: z.object({
+      limit: z.coerce.number().int().positive().max(100).default(50),
+    }),
+    run: async (args, context) => {
+      const patients = await patientsService.list({
+        actor: context.actor,
+        limit: args.limit,
+      });
+
+      return {
+        total: patients.length,
+        patients,
+      };
+    },
+  }),
+
   search_patient: defineTool({
     description: "Searches patients by name or CIN",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
@@ -478,10 +589,91 @@ const toolRegistry = {
       await assertPatientAccess(context.actor, args.patientId);
       const chunks = await ragService.retrieveContext(args.patientId, args.query, args.limit);
 
+      if (chunks.length > 0) {
+        return {
+          patientId: args.patientId,
+          query: args.query,
+          matches: chunks,
+        };
+      }
+
+      const terms = extractSearchTerms(args.query);
+      if (terms.length === 0) {
+        return {
+          patientId: args.patientId,
+          query: args.query,
+          matches: [],
+          fallbackUsed: "mongo_ai_records",
+        };
+      }
+
+      const records = await AIRecordModel.find({
+        patientId: new Types.ObjectId(args.patientId),
+        deletedAt: { $exists: false },
+      })
+        .sort({ createdAt: -1 })
+        .limit(25)
+        .select("_id mode provider response contextChunks createdAt");
+
+      const fallbackMatches = records
+        .flatMap((record) => {
+          const responseText = record.response?.trim() ?? "";
+          const responseScore = scoreTextMatch(responseText, terms);
+
+          const responseMatch =
+            responseScore > 0
+              ? [
+                  {
+                    sourceId: `record:${record._id.toString()}:response`,
+                    content: truncateResultContent(responseText),
+                    score: responseScore,
+                    sourceLabel: `mongo_record_${record.mode}`,
+                    metadata: {
+                      recordId: record._id.toString(),
+                      provider: record.provider,
+                      createdAt: record.createdAt?.toISOString?.(),
+                      fallback: true,
+                      sourceType: "record_response",
+                    },
+                  },
+                ]
+              : [];
+
+          const chunkMatches = record.contextChunks
+            .map((chunk, index) => {
+              const chunkText = (chunk.content ?? "").trim();
+              const chunkScore = scoreTextMatch(chunkText, terms);
+              if (chunkScore <= 0) {
+                return null;
+              }
+
+              return {
+                sourceId: `record:${record._id.toString()}:chunk:${index}`,
+                content: truncateResultContent(chunkText),
+                score: chunkScore,
+                sourceLabel: chunk.sourceLabel || `mongo_chunk_${record.mode}`,
+                metadata: {
+                  ...(chunk.metadata ?? {}),
+                  recordId: record._id.toString(),
+                  provider: record.provider,
+                  createdAt: record.createdAt?.toISOString?.(),
+                  fallback: true,
+                  sourceType: "context_chunk",
+                },
+              };
+            })
+            .filter((item): item is NonNullable<typeof item> => item !== null);
+
+          return [...responseMatch, ...chunkMatches];
+        })
+        .sort((a, b) => b.score - a.score)
+        .slice(0, args.limit);
+
       return {
         patientId: args.patientId,
         query: args.query,
-        matches: chunks,
+        matches: fallbackMatches,
+        fallbackUsed: "mongo_ai_records",
       };
     },
   }),

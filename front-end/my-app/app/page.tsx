@@ -50,6 +50,12 @@ interface AgentExecutionResult {
   results?: unknown;
 }
 
+interface ToolExecutionResultItem {
+  tool: string;
+  args?: unknown;
+  result?: unknown;
+}
+
 interface AgentConfirmResult {
   pendingActionId: string;
   status: "rejected" | "executed";
@@ -107,13 +113,39 @@ interface ConversationContextPack {
   totalCount: number;
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000/api/v1";
+const DEFAULT_API_BASE_URL = "http://localhost:4000/api/v1";
 const TOKEN_STORAGE_KEY = "mediassist_access_token";
 const MAX_HISTORY_ITEMS = 50;
 const MAX_ENTITY_MEMORY = 24;
 const MAX_CONTEXT_HISTORY_ITEMS = 8;
 const MAX_CONTEXT_ENTITY_ITEMS = 10;
 const MAX_CONTEXT_CHARACTERS = 3800;
+
+function normalizeApiBaseUrl(rawValue: string | undefined): string {
+  const trimmed = rawValue?.trim();
+  if (!trimmed) {
+    return DEFAULT_API_BASE_URL;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    const normalizedPath =
+      parsed.pathname === "/" || parsed.pathname.trim().length === 0
+        ? "/api/v1"
+        : parsed.pathname.replace(/\/+$/, "");
+
+    return `${parsed.origin}${normalizedPath}`;
+  } catch {
+    const cleaned = trimmed.replace(/\/+$/, "");
+    return cleaned || DEFAULT_API_BASE_URL;
+  }
+}
+
+const API_BASE_URL = normalizeApiBaseUrl(process.env.NEXT_PUBLIC_API_BASE_URL);
+
+function buildApiUrl(path: string): string {
+  return `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+}
 
 function createId(prefix: string): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -209,6 +241,137 @@ function safeJson(value: unknown): string {
   } catch {
     return "<non-serializable payload>";
   }
+}
+
+function parseToolExecutionItems(value: unknown): ToolExecutionResultItem[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const items: ToolExecutionResultItem[] = [];
+
+  for (const candidate of value) {
+    if (!isRecord(candidate) || typeof candidate.tool !== "string") {
+      continue;
+    }
+
+    items.push({
+      tool: candidate.tool,
+      args: candidate.args,
+      result: candidate.result,
+    });
+  }
+
+  return items;
+}
+
+function normalizeMedicationLine(line: string): string {
+  return line
+    .replace(/^[-*\d.)\s]+/, "")
+    .replace(/\*\*/g, "")
+    .replace(/^new medication:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s*\.\.\.$/, "")
+    .trim();
+}
+
+function isLikelyMedicationLine(line: string): boolean {
+  const lowered = line.toLowerCase();
+
+  if (!lowered || lowered === "medications:") {
+    return false;
+  }
+
+  if (lowered.includes("medication change")) {
+    return false;
+  }
+
+  const hasDose = /\b\d+(?:\.\d+)?\s?(mg|mcg|g|ml)\b/i.test(line);
+  const hasSchedule =
+    /\b(po|iv|im|bid|tid|qid|q\d+h|qhs|prn|daily|weekly|with meals)\b/i.test(lowered);
+  const hasMedicationVerb = /\b(start|stop|discontinue|take|takes|using|use)\b/i.test(lowered);
+
+  return hasDose && (hasSchedule || hasMedicationVerb);
+}
+
+function extractMedicationLinesFromMatches(matches: unknown): string[] {
+  if (!Array.isArray(matches)) {
+    return [];
+  }
+
+  const extracted = new Set<string>();
+
+  for (const candidate of matches) {
+    if (!isRecord(candidate) || typeof candidate.content !== "string") {
+      continue;
+    }
+
+    const lines = candidate.content.split(/\r?\n/);
+    for (const rawLine of lines) {
+      const line = normalizeMedicationLine(rawLine);
+      if (!line || line.length < 6) {
+        continue;
+      }
+
+      if (!isLikelyMedicationLine(line)) {
+        continue;
+      }
+
+      extracted.add(line);
+    }
+  }
+
+  return Array.from(extracted);
+}
+
+function isMedicationQuestion(prompt: string): boolean {
+  return /\b(medication|medications|medicine|medicines|drug|drugs|prescription|takes|taking)\b/i.test(
+    prompt,
+  );
+}
+
+function extractPatientNameFromSearchResult(items: ToolExecutionResultItem[]): string | null {
+  const searchPatientResult = items.find((item) => item.tool === "search_patient")?.result;
+  if (!isRecord(searchPatientResult) || !Array.isArray(searchPatientResult.patients)) {
+    return null;
+  }
+
+  const first = searchPatientResult.patients[0];
+  if (!isRecord(first)) {
+    return null;
+  }
+
+  const firstName = typeof first.firstName === "string" ? first.firstName.trim() : "";
+  const lastName = typeof first.lastName === "string" ? first.lastName.trim() : "";
+  const fullName = `${firstName} ${lastName}`.trim();
+  return fullName || null;
+}
+
+function formatConversationResultText(
+  result: AgentExecutionResult,
+  userPrompt: string,
+): string | null {
+  if (!isMedicationQuestion(userPrompt)) {
+    return null;
+  }
+
+  const items = parseToolExecutionItems(result.results);
+  const ragResult = items.find((item) => item.tool === "search_medical_records_RAG")?.result;
+  if (!isRecord(ragResult)) {
+    return null;
+  }
+
+  const medications = extractMedicationLinesFromMatches(ragResult.matches).slice(0, 8);
+  if (medications.length === 0) {
+    return "I checked the medical records but could not extract explicit medication lines.";
+  }
+
+  const patientName = extractPatientNameFromSearchResult(items);
+  const header = patientName
+    ? `Medications found for ${patientName}:`
+    : "Medications found in patient records:";
+
+  return [header, ...medications.map((entry) => `- ${entry}`)].join("\n");
 }
 
 function sanitizeToolCalls(value: unknown): AgentToolCall[] {
@@ -531,6 +694,17 @@ const BASE_QUICK_PROMPTS: QuickPrompt[] = [
     prompt: "List all active doctors in the facility with their specialties and IDs.",
   },
   {
+    title: "List patients",
+    mode: "fetch",
+    prompt: "List all accessible patients with IDs, CIN, and key profile fields.",
+  },
+  {
+    title: "Create patient",
+    mode: "insert",
+    prompt:
+      "Create a patient with first name Youssef, last name Amrani, CIN AB123456, phone +212600000000, email youssef.amrani@example.com, and pathologies hypertension and asthma.",
+  },
+  {
     title: "Create appointment",
     mode: "insert",
     prompt:
@@ -676,12 +850,20 @@ export default function Home() {
         headers.set("Idempotency-Key", options.idempotencyKey);
       }
 
-      const response = await fetch(`${API_BASE_URL}${path}`, {
-        ...options,
-        headers,
-        credentials: "include",
-        cache: "no-store",
-      });
+      const requestUrl = buildApiUrl(path);
+      const requestMethod = options?.method ?? "GET";
+
+      let response: Response;
+      try {
+        response = await fetch(requestUrl, {
+          ...options,
+          headers,
+          credentials: "include",
+          cache: "no-store",
+        });
+      } catch (error) {
+        throw new Error(`Network error for ${requestMethod} ${requestUrl}: ${extractErrorMessage(error)}`);
+      }
 
       const payload = (await response.json().catch(() => null)) as (ApiEnvelope<T> & {
         issues?: unknown;
@@ -693,8 +875,13 @@ export default function Home() {
           clearSession();
         }
 
+        const baseMessage =
+          formatApiErrorMessage(payload) ??
+          payload?.message ??
+          `Request failed with status ${response.status}`;
+
         throw new Error(
-          formatApiErrorMessage(payload) ?? payload?.message ?? `Request failed with status ${response.status}`,
+          `${baseMessage} | HTTP ${response.status} ${requestMethod} ${requestUrl}`,
         );
       }
 
@@ -1003,10 +1190,13 @@ export default function Home() {
       setLastResult(result);
       applyOutcomeToMemory(result);
 
+      const formattedConversationText = formatConversationResultText(result, trimmed);
+
       pushHistory({
         kind: "result",
         title: result.requiresConfirmation ? "Confirmation required" : "Execution result",
         text:
+          formattedConversationText ??
           result.finalMessage ??
           result.message ??
           (result.requiresConfirmation
@@ -1475,7 +1665,7 @@ export default function Home() {
                   </button>
                 </div>
 
-                <div className="rounded-xl border border-[#d6e6e6] bg-[#f8fcfc] p-3">
+                <div className="min-w-0 overflow-x-hidden rounded-xl border border-[#d6e6e6] bg-[#f8fcfc] p-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
@@ -1510,7 +1700,7 @@ export default function Home() {
                     {contextPack.pendingLine ? ", pending action: 1" : ", pending action: 0"}).
                   </p>
 
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <div className="mt-3 flex min-w-0 flex-wrap items-center gap-2">
                     <span className="text-xs font-semibold text-slate-600">Presets</span>
                     {([
                       "full",
@@ -1532,7 +1722,9 @@ export default function Home() {
                       </button>
                     ))}
 
-                    <span className="pill bg-[#f8fafb] text-slate-600">Current: {contextPresetLabel(contextPreset)}</span>
+                    <span className="pill max-w-full break-words bg-[#f8fafb] text-slate-600">
+                      Current: {contextPresetLabel(contextPreset)}
+                    </span>
                   </div>
 
                   {contextPack.items.length > 0 ? (
@@ -1559,7 +1751,7 @@ export default function Home() {
                         </button>
                       </div>
 
-                      <div className="space-y-2">
+                      <div className="min-w-0 space-y-2">
                         {(["history", "entity", "pending"] as ContextItemKind[]).map((kind) => {
                           const items = groupedContextItems[kind];
                           if (items.length === 0) {
@@ -1573,10 +1765,10 @@ export default function Home() {
                           return (
                             <article
                               key={kind}
-                              className="rounded-xl border border-[#d6e6e6] bg-white p-3"
+                              className="min-w-0 rounded-xl border border-[#d6e6e6] bg-white p-3"
                             >
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="flex items-center gap-2">
+                              <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                <div className="flex min-w-0 flex-wrap items-center gap-2">
                                   <span className={`pill ${contextItemKindClass(kind)}`}>
                                     {contextItemKindLabel(kind)}
                                   </span>
@@ -1585,7 +1777,7 @@ export default function Home() {
                                   </span>
                                 </div>
 
-                                <div className="flex flex-wrap gap-2">
+                                <div className="flex flex-wrap gap-2 sm:justify-end">
                                   <button
                                     type="button"
                                     onClick={() => handleIncludeContextGroup(kind)}
@@ -1611,7 +1803,7 @@ export default function Home() {
                               </div>
 
                               {!collapsedContextGroups[kind] && (
-                                <div className="mt-3 flex flex-wrap gap-2">
+                                <div className="mt-3 flex min-w-0 flex-wrap gap-2">
                                   {items.map((item) => {
                                     const isExcluded = excludedContextKeySet.has(item.key);
 
@@ -1621,7 +1813,7 @@ export default function Home() {
                                         type="button"
                                         aria-pressed={!isExcluded}
                                         onClick={() => handleToggleContextItem(item.key)}
-                                        className={`rounded-full border px-3 py-1 text-[11px] font-semibold transition ${
+                                        className={`max-w-full break-words rounded-full border px-3 py-1 text-left text-[11px] font-semibold transition ${
                                           isExcluded
                                             ? "border-[#d3dce2] bg-white text-slate-500 line-through"
                                             : `border-transparent ${contextItemKindClass(item.kind)}`
@@ -1646,14 +1838,14 @@ export default function Home() {
                   )}
 
                   {showContextPreview && (
-                    <pre className="code-text mt-3 max-h-44 overflow-auto rounded-xl bg-white p-3 text-[11px] text-[#173b46]">
+                    <pre className="code-text mt-3 max-h-44 max-w-full overflow-auto rounded-xl bg-white p-3 text-[11px] text-[#173b46]">
                       {contextPack.text || "No context available yet."}
                     </pre>
                   )}
                 </div>
 
                 <div className="rounded-xl border border-[#d6e6e6] bg-white p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <h3 className="text-sm font-semibold text-[#11333f]">Conversation</h3>
                     <span className="pill bg-[#f5fbfb] text-[#15414d]">
                       {chatMessages.length} messages
@@ -1675,7 +1867,10 @@ export default function Home() {
                             : "mr-auto border-[#cce8d9] bg-[#ecfdf3]";
 
                         return (
-                          <article key={item.id} className={`max-w-[94%] rounded-xl border p-3 ${bubbleClass}`}>
+                          <article
+                            key={item.id}
+                            className={`max-w-[94%] min-w-0 rounded-xl border p-3 ${bubbleClass}`}
+                          >
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <span className={historyBadgeClass(item.kind)}>{item.kind}</span>
                               <span className="code-text text-[11px] text-slate-500">
@@ -1684,14 +1879,16 @@ export default function Home() {
                             </div>
 
                             <h4 className="mt-2 text-sm font-semibold text-[#11333f]">{item.title}</h4>
-                            <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{item.text}</p>
+                            <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">
+                              {item.text}
+                            </p>
 
                             {item.payload !== undefined && (
-                              <details className="mt-2">
+                              <details className="mt-2 min-w-0">
                                 <summary className="cursor-pointer text-xs text-[#1a56a8]">
                                   View raw payload
                                 </summary>
-                                <pre className="code-text mt-2 max-h-56 overflow-auto rounded-lg bg-white/70 p-2 text-[11px] text-[#173b46]">
+                                <pre className="code-text mt-2 max-h-56 w-full max-w-full overflow-x-auto overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-white/70 p-2 text-[11px] text-[#173b46]">
                                   {safeJson(item.payload)}
                                 </pre>
                               </details>
@@ -1875,9 +2072,9 @@ export default function Home() {
                           <span className="code-text text-xs text-[#7a4f07]">{call.tool}</span>
                           {call.reason && <span className="text-xs text-slate-600">{call.reason}</span>}
                         </div>
-                        <details className="mt-2">
+                        <details className="mt-2 min-w-0">
                           <summary className="cursor-pointer text-xs text-[#7a4f07]">View args</summary>
-                          <pre className="code-text mt-2 overflow-auto rounded-lg bg-[#fdf6e8] p-2 text-[11px] text-[#724a06]">
+                          <pre className="code-text mt-2 max-h-56 w-full max-w-full overflow-x-auto overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-[#fdf6e8] p-2 text-[11px] text-[#724a06]">
                             {safeJson(call.args)}
                           </pre>
                         </details>
@@ -1911,7 +2108,7 @@ export default function Home() {
                 Use this panel for quick debugging of tool plans and execution output.
               </p>
 
-              <pre className="code-text mt-3 max-h-[420px] overflow-auto rounded-xl bg-[#f5fbfb] p-3 text-xs text-[#173b46]">
+              <pre className="code-text mt-3 max-h-[420px] w-full max-w-full overflow-x-auto overflow-y-auto whitespace-pre-wrap break-words rounded-xl bg-[#f5fbfb] p-3 text-xs text-[#173b46]">
                 {safeJson(lastResult)}
               </pre>
             </section>

@@ -2,6 +2,8 @@ import { Schema, Types, model, type Document } from "mongoose";
 import type { UserRole } from "../types/auth";
 
 export const AGENT_TOOL_NAMES = [
+  "create_patient",
+  "list_patients",
   "search_patient",
   "get_patient_summary",
   "list_appointments",
@@ -18,6 +20,8 @@ export const AGENT_TOOL_NAMES = [
 ] as const;
 
 export type AgentToolName =
+  | "create_patient"
+  | "list_patients"
   | "search_patient"
   | "get_patient_summary"
   | "list_appointments"
