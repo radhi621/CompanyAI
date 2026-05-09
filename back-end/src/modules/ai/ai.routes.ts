@@ -10,6 +10,13 @@ export const aiRoutes = Router();
 
 aiRoutes.use(authenticate, authorize("admin", "doctor", "nurse", "secretary"));
 
+aiRoutes.post(
+	"/global/upload",
+	authorize("admin"),
+	aiRecordUpload.array("files", 8),
+	aiController.uploadGlobalKnowledgeFiles,
+);
+
 aiRoutes.post("/records/generate", ensureAssignedPatientAccessByBody("patientId"), aiController.generateRecord);
 aiRoutes.post(
 	"/records/upload",

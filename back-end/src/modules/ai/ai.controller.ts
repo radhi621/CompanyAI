@@ -7,6 +7,7 @@ import {
   generateAIRecordSchema,
   listAIRecordSchema,
   restoreAIRecordSchema,
+  uploadGlobalKnowledgeSchema,
   uploadAIRecordSchema,
   updateAIRecordSchema,
 } from "./ai.validation";
@@ -56,6 +57,30 @@ export const aiController = {
     res.status(201).json({
       message: "AI record generated from uploaded files",
       data: record,
+    });
+  }),
+
+  uploadGlobalKnowledgeFiles: asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new ApiError(401, "Authentication is required");
+    }
+
+    const parsed = uploadGlobalKnowledgeSchema.parse({ body: req.body ?? {} });
+    const files = (req.files ?? []) as Express.Multer.File[];
+
+    if (files.length === 0) {
+      throw new ApiError(400, "At least one file is required");
+    }
+
+    const result = await aiService.uploadGlobalKnowledgeFromFiles({
+      actor: req.user,
+      files,
+      note: parsed.body.note,
+    });
+
+    res.status(201).json({
+      message: "Global knowledge files indexed successfully",
+      data: result,
     });
   }),
 

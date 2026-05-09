@@ -678,6 +678,29 @@ const toolRegistry = {
     },
   }),
 
+  search_global_knowledge_RAG: defineTool({
+    description: "Performs semantic search in globally indexed RAG knowledge",
+    allowedRoles: ["admin", "doctor", "nurse", "secretary"],
+    destructive: false,
+    argsShape: {
+      query: "required string",
+      limit: "optional number",
+    },
+    argsSchema: z.object({
+      query: z.string().min(3).max(2000),
+      limit: z.coerce.number().int().positive().max(10).default(5),
+    }),
+    run: async (args) => {
+      const chunks = await ragService.retrieveGlobalContext(args.query, args.limit);
+
+      return {
+        query: args.query,
+        matches: chunks,
+        scope: "global",
+      };
+    },
+  }),
+
   update_patient_notes: defineTool({
     description: "Adds a new note to a patient record with ownership tracking",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],

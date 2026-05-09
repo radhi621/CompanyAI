@@ -12,6 +12,7 @@ export const AGENT_TOOL_NAMES = [
   "cancel_appointment",
   "get_uncontacted_patients",
   "search_medical_records_RAG",
+  "search_global_knowledge_RAG",
   "update_patient_notes",
   "get_day_schedule",
   "create_staff_account",
@@ -30,6 +31,7 @@ export type AgentToolName =
   | "cancel_appointment"
   | "get_uncontacted_patients"
   | "search_medical_records_RAG"
+  | "search_global_knowledge_RAG"
   | "update_patient_notes"
   | "get_day_schedule"
   | "create_staff_account"

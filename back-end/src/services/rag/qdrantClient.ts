@@ -10,6 +10,7 @@ export const qdrantClient = new QdrantClient({
 let isCollectionReady = false;
 
 const REQUIRED_PAYLOAD_INDEXES = [
+  { fieldName: "scope", fieldSchema: "keyword" as const },
   { fieldName: "patientId", fieldSchema: "keyword" as const },
   { fieldName: "recordId", fieldSchema: "keyword" as const },
 ];

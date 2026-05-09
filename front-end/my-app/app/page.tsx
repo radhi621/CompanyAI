@@ -1,22 +1,18 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type UserRole = "admin" | "doctor" | "nurse" | "secretary";
-type FeedbackType = "success" | "error" | "info";
 type PromptMode = "fetch" | "insert";
-type AIRecordMode = "non_rag" | "rag";
-type HistoryKind = "prompt" | "result" | "system";
-type EntityType = "patient" | "doctor" | "appointment";
-type ContextItemKind = "history" | "entity" | "pending";
-type ContextPreset = "full" | "history-only" | "entities-only" | "pending-only" | "custom";
-
-type Nullable<T> = T | null;
+type MessageRole = "user" | "assistant" | "system";
+type ChatScope = "global" | "patient";
+type RagUploadMode = "global" | "patient";
 
 interface ApiEnvelope<T> {
   message: string;
   data: T;
   details?: unknown;
+  issues?: unknown;
 }
 
 interface AuthUser {
@@ -47,14 +43,8 @@ interface AgentExecutionResult {
   finalMessage?: string;
   message?: string;
   plannedToolCalls?: AgentToolCall[];
+  autoChainedToolCalls?: AgentToolCall[];
   results?: unknown;
-}
-
-interface ToolExecutionResultItem {
-  tool: string;
-  args?: unknown;
-  result?: unknown;
-  error?: string;
 }
 
 interface AgentConfirmResult {
@@ -64,44 +54,11 @@ interface AgentConfirmResult {
   results?: unknown;
 }
 
-interface AgentHistoryEntry {
-  id: string;
-  prompt: string;
-  plannerResponse: string;
-  toolResults: ToolExecutionResultItem[];
-  requiresConfirmation: boolean;
-  success: boolean;
-  errorMessage?: string;
-  createdAt: string;
-}
-
-interface RAGSourceFileItem {
-  fileName: string;
-  extension: string;
-  chunkCount: number | null;
-}
-
-interface RAGRecordListItem {
-  id: string;
-  title: string | null;
-  prompt: string;
-  provider: string | null;
-  createdAt: string | null;
-  sourceFiles: RAGSourceFileItem[];
-}
-
-interface Feedback {
-  type: FeedbackType;
-  message: string;
-}
-
-interface HistoryItem {
-  id: string;
-  kind: HistoryKind;
-  title: string;
-  text: string;
-  payload?: unknown;
-  createdAt: number;
+interface ExecutedToolResult {
+  tool: string;
+  args?: Record<string, unknown>;
+  result?: unknown;
+  error?: string;
 }
 
 interface PendingActionState {
@@ -110,43 +67,65 @@ interface PendingActionState {
   plannedToolCalls: AgentToolCall[];
 }
 
-interface EntityReference {
-  type: EntityType;
+interface ChatMessage {
   id: string;
-  label: string;
-  hint?: string;
-}
-
-interface QuickPrompt {
-  title: string;
-  mode: PromptMode;
-  prompt: string;
-}
-
-interface ConversationContextItem {
-  key: string;
-  kind: ContextItemKind;
-  label: string;
-  line: string;
-}
-
-interface ConversationContextPack {
+  role: MessageRole;
   text: string;
-  historyLines: string[];
-  entityLines: string[];
-  pendingLine?: string;
-  items: ConversationContextItem[];
-  includedCount: number;
-  totalCount: number;
+  createdAt: number;
+  raw?: unknown;
 }
+
+interface PatientFolder {
+  id: string;
+  name: string;
+  patientId: string;
+  createdAt: number;
+}
+
+interface ConversationState {
+  messages: ChatMessage[];
+  pendingAction: PendingActionState | null;
+}
+
+type ConversationMap = Record<string, ConversationState>;
 
 const DEFAULT_API_BASE_URL = "http://localhost:4000/api/v1";
 const TOKEN_STORAGE_KEY = "mediassist_access_token";
-const MAX_HISTORY_ITEMS = 50;
-const MAX_ENTITY_MEMORY = 24;
-const MAX_CONTEXT_HISTORY_ITEMS = 8;
-const MAX_CONTEXT_ENTITY_ITEMS = 10;
-const MAX_CONTEXT_CHARACTERS = 3800;
+const CHAT_SCOPE_STORAGE_KEY = "mediassist_chat_scope_v1";
+const PATIENT_FOLDERS_STORAGE_KEY = "mediassist_patient_folders_v2";
+const ACTIVE_FOLDER_STORAGE_KEY = "mediassist_active_folder_v2";
+const CONVERSATIONS_STORAGE_KEY = "mediassist_conversations_v2";
+const GLOBAL_CONVERSATION_ID = "__global__";
+
+const QUICK_ACTIONS: Array<{ title: string; mode: PromptMode; prompt: string }> = [
+  {
+    title: "Today schedule",
+    mode: "fetch",
+    prompt: "Show me today schedule in Africa/Casablanca and summarize by doctor.",
+  },
+  {
+    title: "List patients",
+    mode: "fetch",
+    prompt: "List all accessible patients with IDs, CIN, and key profile fields.",
+  },
+  {
+    title: "Find by CIN",
+    mode: "fetch",
+    prompt: "Find patient by CIN AB123456 and show basic profile.",
+  },
+  {
+    title: "Create patient",
+    mode: "insert",
+    prompt:
+      "Create a patient with first name Youssef, last name Amrani, CIN AB123456, phone +212600000000, email youssef.amrani@example.com, and pathologies hypertension and asthma.",
+  },
+  {
+    title: "Create appointment",
+    mode: "insert",
+    prompt:
+      "Create an appointment for patient <PATIENT_ID> with doctor <DOCTOR_ID> on 2026-04-20 at 10:00 for post-op follow up, 60 minutes.",
+  },
+];
 
 function normalizeApiBaseUrl(rawValue: string | undefined): string {
   const trimmed = rawValue?.trim();
@@ -186,8 +165,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function toOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
 function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unexpected error";
+}
+
+function formatDateTime(value: string | number): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value);
+  }
+
+  return new Intl.DateTimeFormat("en-GB", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(parsed);
 }
 
 function formatApiErrorMessage(payload: unknown): string | null {
@@ -195,818 +190,29 @@ function formatApiErrorMessage(payload: unknown): string | null {
     return null;
   }
 
-  const baseMessage = typeof payload.message === "string" ? payload.message : null;
+  const baseMessage = toOptionalString(payload.message) ?? null;
   const issues = payload.issues;
-
   if (!isRecord(issues) || !isRecord(issues.fieldErrors)) {
     return baseMessage;
   }
 
-  const fieldEntries: string[] = [];
-
-  Object.entries(issues.fieldErrors).forEach(([field, value]) => {
+  const fieldMessages: string[] = [];
+  for (const [field, value] of Object.entries(issues.fieldErrors)) {
     if (!Array.isArray(value) || value.length === 0) {
-      return;
+      continue;
     }
 
     const firstMessage = value.find((item) => typeof item === "string");
     if (typeof firstMessage === "string") {
-      fieldEntries.push(`${field}: ${firstMessage}`);
+      fieldMessages.push(`${field}: ${firstMessage}`);
     }
-  });
+  }
 
-  if (fieldEntries.length === 0) {
+  if (fieldMessages.length === 0) {
     return baseMessage;
   }
 
-  const prefix = baseMessage ?? "Validation error";
-  return `${prefix} | ${fieldEntries.join(" | ")}`;
-}
-
-function formatDateTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return new Intl.DateTimeFormat("en-GB", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
-}
-
-function rolePillClass(role: UserRole): string {
-  switch (role) {
-    case "admin":
-      return "pill bg-[#fef7e6] text-[#7a4f07]";
-    case "doctor":
-      return "pill bg-[#ecf9ff] text-[#0f4f80]";
-    case "nurse":
-      return "pill bg-[#ecfdf3] text-[#176742]";
-    case "secretary":
-      return "pill bg-[#f4f0ff] text-[#5636a1]";
-    default:
-      return "pill";
-  }
-}
-
-function historyBadgeClass(kind: HistoryKind): string {
-  if (kind === "prompt") {
-    return "pill bg-[#edf7ff] text-[#1a56a8]";
-  }
-
-  if (kind === "result") {
-    return "pill bg-[#ecfdf3] text-[#176742]";
-  }
-
-  return "pill bg-[#fff4e8] text-[#9a4f00]";
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return "<non-serializable payload>";
-  }
-}
-
-function parseToolExecutionItems(value: unknown): ToolExecutionResultItem[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const items: ToolExecutionResultItem[] = [];
-
-  for (const candidate of value) {
-    if (!isRecord(candidate) || typeof candidate.tool !== "string") {
-      continue;
-    }
-
-    items.push({
-      tool: candidate.tool,
-      args: candidate.args,
-      result: candidate.result,
-      error: typeof candidate.error === "string" ? candidate.error : undefined,
-    });
-  }
-
-  return items;
-}
-
-function extractUserRequestFromStoredPrompt(prompt: string): string {
-  const trimmed = prompt.trim();
-  if (!trimmed) {
-    return "";
-  }
-
-  const explicitRequestMarker = "current user request:";
-  const markerIndex = trimmed.toLowerCase().lastIndexOf(explicitRequestMarker);
-  if (markerIndex !== -1) {
-    const candidate = trimmed.slice(markerIndex + explicitRequestMarker.length).trim();
-    if (candidate) {
-      return candidate;
-    }
-  }
-
-  const ignoredBlocks = new Set(["Conversation context from previous turns:", "Current user request:"]);
-  const blocks = trimmed
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter(Boolean)
-    .filter((block) => !block.startsWith("Mode:"))
-    .filter((block) => !ignoredBlocks.has(block));
-
-  return blocks.at(-1) ?? trimmed;
-}
-
-function parseAgentHistoryEntries(value: unknown): AgentHistoryEntry[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const items: AgentHistoryEntry[] = [];
-
-  for (const candidate of value) {
-    if (!isRecord(candidate)) {
-      continue;
-    }
-
-    const id =
-      (typeof candidate.id === "string" ? candidate.id.trim() : "") ||
-      (typeof candidate._id === "string" ? candidate._id.trim() : "");
-    const prompt = typeof candidate.prompt === "string" ? candidate.prompt : "";
-    const createdAt = typeof candidate.createdAt === "string" ? candidate.createdAt : "";
-
-    if (!id || !prompt || !createdAt) {
-      continue;
-    }
-
-    items.push({
-      id,
-      prompt,
-      plannerResponse:
-        typeof candidate.plannerResponse === "string" ? candidate.plannerResponse : "",
-      toolResults: parseToolExecutionItems(candidate.toolResults),
-      requiresConfirmation: Boolean(candidate.requiresConfirmation),
-      success: Boolean(candidate.success),
-      errorMessage: typeof candidate.errorMessage === "string" ? candidate.errorMessage : undefined,
-      createdAt,
-    });
-  }
-
-  return items;
-}
-
-function parseNumberCandidate(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value === "string") {
-    const numeric = Number(value);
-    if (Number.isFinite(numeric)) {
-      return numeric;
-    }
-  }
-
-  return null;
-}
-
-function parseRagSourceFileItems(value: unknown): RAGSourceFileItem[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const items: RAGSourceFileItem[] = [];
-
-  for (const candidate of value) {
-    if (!isRecord(candidate)) {
-      continue;
-    }
-
-    const fileName = typeof candidate.fileName === "string" ? candidate.fileName.trim() : "";
-    if (!fileName) {
-      continue;
-    }
-
-    const extension = typeof candidate.extension === "string" ? candidate.extension.trim() : "";
-    const chunkCount = parseNumberCandidate(candidate.chunkCount);
-
-    items.push({
-      fileName,
-      extension,
-      chunkCount,
-    });
-  }
-
-  return items;
-}
-
-function parseRagRecordList(value: unknown): RAGRecordListItem[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const items: RAGRecordListItem[] = [];
-
-  for (const candidate of value) {
-    if (!isRecord(candidate)) {
-      continue;
-    }
-
-    const id = typeof candidate._id === "string" ? candidate._id.trim() : "";
-    const mode = typeof candidate.mode === "string" ? candidate.mode : "";
-    if (!id || mode !== "rag") {
-      continue;
-    }
-
-    const title = typeof candidate.title === "string" ? candidate.title.trim() || null : null;
-    const prompt = typeof candidate.prompt === "string" ? candidate.prompt.trim() : "";
-    const provider =
-      typeof candidate.provider === "string" ? candidate.provider.trim() || null : null;
-    const createdAt =
-      typeof candidate.createdAt === "string" ? candidate.createdAt.trim() || null : null;
-
-    items.push({
-      id,
-      title,
-      prompt,
-      provider,
-      createdAt,
-      sourceFiles: parseRagSourceFileItems(candidate.sourceFiles),
-    });
-  }
-
-  return items;
-}
-
-function toOptionalString(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function renderPersonName(value: unknown): string | null {
-  if (typeof value === "string") {
-    const direct = value.trim();
-    return direct.length > 0 ? direct : null;
-  }
-
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const firstName = toOptionalString(value.firstName);
-  const lastName = toOptionalString(value.lastName);
-  const fullName = toOptionalString(value.fullName);
-  const name = toOptionalString(value.name);
-
-  if (firstName || lastName) {
-    return `${firstName ?? ""} ${lastName ?? ""}`.trim();
-  }
-
-  return fullName ?? name;
-}
-
-function renderPathologies(value: unknown): string | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-
-  const items = value
-    .filter((entry): entry is string => typeof entry === "string")
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .slice(0, 6);
-
-  if (items.length === 0) {
-    return null;
-  }
-
-  return items.join(", ");
-}
-
-function renderEntityIdentifier(value: unknown): string | null {
-  return getObjectIdCandidate(value);
-}
-
-function renderDateLabel(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  return formatDateTime(value);
-}
-
-function normalizeMedicationLine(line: string): string {
-  return line
-    .replace(/^[-*\d.)\s]+/, "")
-    .replace(/\*\*/g, "")
-    .replace(/^new medication:\s*/i, "")
-    .replace(/\s+/g, " ")
-    .replace(/\s*\.\.\.$/, "")
-    .trim();
-}
-
-function isLikelyMedicationLine(line: string): boolean {
-  const lowered = line.toLowerCase();
-
-  if (!lowered || lowered === "medications:") {
-    return false;
-  }
-
-  if (lowered.includes("medication change")) {
-    return false;
-  }
-
-  const hasDose = /\b\d+(?:\.\d+)?\s?(mg|mcg|g|ml)\b/i.test(line);
-  const hasSchedule =
-    /\b(po|iv|im|bid|tid|qid|q\d+h|qhs|prn|daily|weekly|with meals)\b/i.test(lowered);
-  const hasMedicationVerb = /\b(start|stop|discontinue|take|takes|using|use)\b/i.test(lowered);
-
-  return hasDose && (hasSchedule || hasMedicationVerb);
-}
-
-function extractMedicationLinesFromMatches(matches: unknown): string[] {
-  if (!Array.isArray(matches)) {
-    return [];
-  }
-
-  const extracted = new Set<string>();
-
-  for (const candidate of matches) {
-    if (!isRecord(candidate) || typeof candidate.content !== "string") {
-      continue;
-    }
-
-    const lines = candidate.content.split(/\r?\n/);
-    for (const rawLine of lines) {
-      const line = normalizeMedicationLine(rawLine);
-      if (!line || line.length < 6) {
-        continue;
-      }
-
-      if (!isLikelyMedicationLine(line)) {
-        continue;
-      }
-
-      extracted.add(line);
-    }
-  }
-
-  return Array.from(extracted);
-}
-
-function isMedicationQuestion(prompt: string): boolean {
-  return /\b(medication|medications|medicine|medicines|drug|drugs|prescription|takes|taking)\b/i.test(
-    prompt,
-  );
-}
-
-function humanizeToolName(toolName: string): string {
-  return toolName.replaceAll("_", " ").trim();
-}
-
-function normalizeSummaryText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function renderPatientLabel(value: unknown): string | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const fullName = renderPersonName(value);
-  if (!fullName) {
-    return null;
-  }
-
-  const cin = toOptionalString(value.cin) ?? "";
-  return cin ? `${fullName} (CIN ${cin})` : fullName;
-}
-
-function summarizeSearchPatientResult(result: unknown): string[] {
-  if (!isRecord(result) || !Array.isArray(result.patients)) {
-    return ["Patient search completed."];
-  }
-
-  const patients = result.patients.filter((patient): patient is Record<string, unknown> =>
-    isRecord(patient),
-  );
-
-  const labels = patients.map((patient) => renderPatientLabel(patient)).filter(Boolean) as string[];
-
-  if (labels.length === 0) {
-    return ["No patient found matching the query."];
-  }
-
-  if (labels.length === 1) {
-    const patient = patients[0];
-    const details: string[] = [];
-    const phone = toOptionalString(patient.phone);
-    const email = toOptionalString(patient.email);
-    const pathologies = renderPathologies(patient.pathologies);
-    const id = renderEntityIdentifier(patient._id) ?? renderEntityIdentifier(patient.id);
-
-    if (phone) {
-      details.push(`Phone: ${phone}`);
-    }
-
-    if (email) {
-      details.push(`Email: ${email}`);
-    }
-
-    if (pathologies) {
-      details.push(`Pathologies: ${pathologies}`);
-    }
-
-    if (id) {
-      details.push(`ID: ${id}`);
-    }
-
-    return [
-      `Patient identified: ${labels[0]}.`,
-      ...(details.length > 0 ? [`Details: ${details.join(" | ")}`] : []),
-    ];
-  }
-
-  const lines = [`Matched ${labels.length} patients:`];
-  labels.slice(0, 5).forEach((label) => {
-    lines.push(`- ${label}`);
-  });
-
-  if (labels.length > 5) {
-    lines.push(`- ...and ${labels.length - 5} more.`);
-  }
-
-  return lines;
-}
-
-function summarizeDoctorsResult(result: unknown): string[] {
-  if (!isRecord(result) || !Array.isArray(result.doctors)) {
-    return ["Doctor listing completed."];
-  }
-
-  const doctors = result.doctors.filter((doctor): doctor is Record<string, unknown> => isRecord(doctor));
-  if (doctors.length === 0) {
-    return ["No doctors found for the requested filters."];
-  }
-
-  const lines = [`Doctors found: ${doctors.length}.`];
-  doctors.slice(0, 6).forEach((doctor) => {
-    const name = renderPersonName(doctor) ?? "Unknown doctor";
-    const specialty = toOptionalString(doctor.specialty);
-    const id = renderEntityIdentifier(doctor._id) ?? renderEntityIdentifier(doctor.id);
-    const status = typeof doctor.isActive === "boolean" ? (doctor.isActive ? "active" : "inactive") : null;
-
-    const detail = [specialty, status].filter(Boolean).join(" | ");
-    lines.push(`- ${name}${detail ? ` (${detail})` : ""}${id ? ` | id ${id}` : ""}`);
-  });
-
-  if (doctors.length > 6) {
-    lines.push(`- ...and ${doctors.length - 6} more.`);
-  }
-
-  return lines;
-}
-
-function summarizePatientsListResult(result: unknown): string[] {
-  if (!isRecord(result) || !Array.isArray(result.patients)) {
-    return ["Patient listing completed."];
-  }
-
-  const patients = result.patients.filter((patient): patient is Record<string, unknown> => isRecord(patient));
-  if (patients.length === 0) {
-    return ["No patients found."];
-  }
-
-  const lines = [`Patients found: ${patients.length}.`];
-  patients.slice(0, 6).forEach((patient) => {
-    const label = renderPatientLabel(patient) ?? "Unknown patient";
-    const pathologies = renderPathologies(patient.pathologies);
-    lines.push(`- ${label}${pathologies ? ` | pathologies: ${pathologies}` : ""}`);
-  });
-
-  if (patients.length > 6) {
-    lines.push(`- ...and ${patients.length - 6} more.`);
-  }
-
-  return lines;
-}
-
-function summarizeAppointmentEntry(entry: Record<string, unknown>): string {
-  const when = renderDateLabel(entry.startAt) ?? renderDateLabel(entry.startAtUtc);
-  const status = toOptionalString(entry.status);
-  const reason = toOptionalString(entry.reason) ?? toOptionalString(entry.motif);
-  const patient = renderPersonName(entry.patientId) ?? renderPersonName(entry.patient) ?? toOptionalString(entry.patientName);
-  const doctor = renderPersonName(entry.doctorId) ?? renderPersonName(entry.doctor) ?? toOptionalString(entry.doctorName);
-
-  const segments = [
-    when ? `Time: ${when}` : null,
-    status ? `Status: ${status}` : null,
-    patient ? `Patient: ${patient}` : null,
-    doctor ? `Doctor: ${doctor}` : null,
-    reason ? `Reason: ${truncateText(reason, 90)}` : null,
-  ].filter((segment): segment is string => Boolean(segment));
-
-  return segments.length > 0 ? segments.join(" | ") : "Appointment details available.";
-}
-
-function summarizeAppointmentsResult(result: unknown): string[] {
-  const appointments = Array.isArray(result)
-    ? result
-    : isRecord(result) && Array.isArray(result.appointments)
-      ? result.appointments
-      : [];
-
-  const entries = appointments.filter((item): item is Record<string, unknown> => isRecord(item));
-  if (entries.length === 0) {
-    return ["No appointments found for the selected filters."];
-  }
-
-  const lines = [`Appointments found: ${entries.length}.`];
-  entries.slice(0, 5).forEach((appointment) => {
-    lines.push(`- ${summarizeAppointmentEntry(appointment)}`);
-  });
-
-  if (entries.length > 5) {
-    lines.push(`- ...and ${entries.length - 5} more.`);
-  }
-
-  return lines;
-}
-
-function summarizeCheckAvailabilityResult(result: unknown): string[] {
-  if (!isRecord(result)) {
-    return ["Availability check completed."];
-  }
-
-  const isAvailable = typeof result.isAvailable === "boolean" ? result.isAvailable : null;
-  const requestedLocal = renderDateLabel(result.requestedStartAtLocal);
-  const duration = typeof result.estimatedDurationMinutes === "number" ? result.estimatedDurationMinutes : null;
-
-  const lines = [
-    isAvailable === null
-      ? "Availability check completed."
-      : isAvailable
-        ? "Doctor is available at the requested slot."
-        : "Doctor is not available at the requested slot.",
-    requestedLocal ? `Requested time: ${requestedLocal}.` : null,
-    duration ? `Estimated duration: ${duration} minutes.` : null,
-  ].filter((line): line is string => Boolean(line));
-
-  const suggestedSlots = Array.isArray(result.suggestedSlots) ? result.suggestedSlots : [];
-  const slotLabels = suggestedSlots
-    .map((slot) => {
-      if (!isRecord(slot)) {
-        return null;
-      }
-
-      return renderDateLabel(slot.startAtLocal) ?? renderDateLabel(slot.startAtUtc);
-    })
-    .filter((slot): slot is string => Boolean(slot))
-    .slice(0, 4);
-
-  if (slotLabels.length > 0) {
-    lines.push(`Suggested slots: ${slotLabels.join(", ")}.`);
-  }
-
-  return lines;
-}
-
-function summarizePatientSummaryResult(result: unknown): string[] {
-  if (!isRecord(result) || !isRecord(result.patient)) {
-    return ["Patient summary fetched."];
-  }
-
-  const patient = result.patient;
-  const patientName = renderPersonName(patient) ?? "Patient";
-  const pathologies = renderPathologies(patient.pathologies);
-  const lines = [
-    `Patient summary for ${patientName}${pathologies ? ` (pathologies: ${pathologies})` : ""}.`,
-  ];
-
-  const recentAppointments = Array.isArray(result.recentAppointments) ? result.recentAppointments : [];
-  const recentNotes = Array.isArray(result.recentNotes) ? result.recentNotes : [];
-  const recentAIRecords = Array.isArray(result.recentAIRecords) ? result.recentAIRecords : [];
-
-  lines.push(
-    `Recent activity: appointments ${recentAppointments.length}, notes ${recentNotes.length}, AI records ${recentAIRecords.length}.`,
-  );
-
-  if (recentAppointments.length > 0 && isRecord(recentAppointments[0])) {
-    lines.push(`Latest appointment: ${summarizeAppointmentEntry(recentAppointments[0])}`);
-  }
-
-  if (recentNotes.length > 0 && isRecord(recentNotes[0]) && typeof recentNotes[0].content === "string") {
-    lines.push(`Latest note: ${truncateText(normalizeSummaryText(recentNotes[0].content), 140)}`);
-  }
-
-  return lines;
-}
-
-function summarizeRagSearchResult(result: unknown, userPrompt: string): string[] {
-  if (!isRecord(result) || !Array.isArray(result.matches)) {
-    return ["Medical records search completed."];
-  }
-
-  if (isMedicationQuestion(userPrompt)) {
-    const medications = extractMedicationLinesFromMatches(result.matches).slice(0, 8);
-    if (medications.length === 0) {
-      return ["I checked the medical records but could not extract explicit medication lines."];
-    }
-
-    const lines = ["Medications found in patient records:", ...medications.map((entry) => `- ${entry}`)];
-
-    const evidence = result.matches
-      .slice(0, 2)
-      .map((match) => {
-        if (!isRecord(match)) {
-          return null;
-        }
-
-        const metadata = isRecord(match.metadata) ? match.metadata : null;
-        return toOptionalString(metadata?.fileName) ?? toOptionalString(match.sourceLabel);
-      })
-      .filter((label): label is string => Boolean(label));
-
-    if (evidence.length > 0) {
-      lines.push(`Evidence sources: ${Array.from(new Set(evidence)).join(", ")}.`);
-    }
-
-    return lines;
-  }
-
-  const matchCount = result.matches.length;
-  if (matchCount === 0) {
-    return ["No relevant records were found for this question."];
-  }
-
-  const lines = [`Relevant evidence found: ${matchCount} record match${matchCount > 1 ? "es" : ""}.`];
-  result.matches.slice(0, 3).forEach((match, index) => {
-    if (!isRecord(match) || typeof match.content !== "string") {
-      return;
-    }
-
-    const metadata = isRecord(match.metadata) ? match.metadata : null;
-    const sourceLabel =
-      toOptionalString(metadata?.fileName) ??
-      toOptionalString(match.sourceLabel) ??
-      `source ${index + 1}`;
-
-    lines.push(`- ${sourceLabel}: ${truncateText(normalizeSummaryText(match.content), 180)}`);
-  });
-
-  if (typeof result.fallbackUsed === "string") {
-    lines.push(`Retrieval mode: ${result.fallbackUsed}.`);
-  }
-
-  return lines;
-}
-
-function summarizeGenericToolResult(toolName: string, result: unknown): string[] {
-  if (!isRecord(result)) {
-    return [`${humanizeToolName(toolName)} executed.`];
-  }
-
-  const lines: string[] = [];
-
-  if (typeof result.message === "string") {
-    lines.push(normalizeSummaryText(result.message));
-  }
-
-  if (typeof result.total === "number") {
-    lines.push(`Total: ${result.total}.`);
-  }
-
-  const primaryArrayEntry = Object.entries(result).find(([, value]) => Array.isArray(value));
-  if (primaryArrayEntry) {
-    const [key, value] = primaryArrayEntry;
-    const entries = Array.isArray(value)
-      ? value.filter((entry): entry is Record<string, unknown> => isRecord(entry))
-      : [];
-    const length = entries.length;
-
-    if (length > 0) {
-      const preview = entries
-        .slice(0, 4)
-        .map((entry) => renderPersonName(entry) ?? toOptionalString(entry.title) ?? toOptionalString(entry.reason))
-        .filter((label): label is string => Boolean(label));
-
-      lines.push(
-        preview.length > 0
-          ? `${humanizeToolName(key)} (${length}): ${preview.join(", ")}${length > preview.length ? ", ..." : ""}.`
-          : `${humanizeToolName(key)} returned ${length} item(s).`,
-      );
-    } else {
-      lines.push(`${humanizeToolName(key)}: 0.`);
-    }
-  }
-
-  const primitiveDetails = Object.entries(result)
-    .filter(([, value]) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
-    .filter(([key]) => key !== "message" && key !== "total")
-    .slice(0, 4)
-    .map(([key, value]) => `${key}: ${String(value)}`);
-
-  if (primitiveDetails.length > 0) {
-    lines.push(primitiveDetails.join(" | "));
-  }
-
-  if (lines.length === 0) {
-    return [`${humanizeToolName(toolName)} completed successfully.`];
-  }
-
-  return lines;
-}
-
-function extractPatientNameFromSearchResult(items: ToolExecutionResultItem[]): string | null {
-  const searchPatientResult = items.find((item) => item.tool === "search_patient")?.result;
-  if (!isRecord(searchPatientResult) || !Array.isArray(searchPatientResult.patients)) {
-    return null;
-  }
-
-  const first = searchPatientResult.patients[0];
-  if (!isRecord(first)) {
-    return null;
-  }
-
-  const firstName = typeof first.firstName === "string" ? first.firstName.trim() : "";
-  const lastName = typeof first.lastName === "string" ? first.lastName.trim() : "";
-  const fullName = `${firstName} ${lastName}`.trim();
-  return fullName || null;
-}
-
-function formatConversationResultText(
-  result: AgentExecutionResult,
-  userPrompt: string,
-): string | null {
-  const items = parseToolExecutionItems(result.results);
-  if (items.length === 0) {
-    return result.finalMessage ?? result.message ?? null;
-  }
-
-  const lines: string[] = [];
-
-  for (const item of items) {
-    let sectionLines: string[];
-
-    switch (item.tool) {
-      case "search_patient":
-        sectionLines = summarizeSearchPatientResult(item.result);
-        break;
-      case "search_medical_records_RAG":
-        sectionLines = summarizeRagSearchResult(item.result, userPrompt);
-        break;
-      case "list_doctors":
-        sectionLines = summarizeDoctorsResult(item.result);
-        break;
-      case "list_patients":
-        sectionLines = summarizePatientsListResult(item.result);
-        break;
-      case "list_appointments":
-      case "get_day_schedule":
-        sectionLines = summarizeAppointmentsResult(item.result);
-        break;
-      case "check_availability":
-        sectionLines = summarizeCheckAvailabilityResult(item.result);
-        break;
-      case "get_patient_summary":
-        sectionLines = summarizePatientSummaryResult(item.result);
-        break;
-      default:
-        sectionLines = summarizeGenericToolResult(item.tool, item.result);
-        break;
-    }
-
-    if (sectionLines.length > 0) {
-      lines.push(...sectionLines);
-    }
-  }
-
-  const uniqueLines = Array.from(
-    new Set(
-      lines
-        .map((line) => line.trim())
-        .filter(Boolean),
-    ),
-  );
-
-  if (uniqueLines.length === 0) {
-    return result.finalMessage ?? result.message ?? "Tools executed successfully.";
-  }
-
-  const patientName = extractPatientNameFromSearchResult(items);
-  if (patientName) {
-    uniqueLines.unshift(`Answer for ${patientName}:`);
-  } else {
-    uniqueLines.unshift("Answer:");
-  }
-
-  return truncateText(uniqueLines.join("\n"), 2200);
+  return `${baseMessage ?? "Validation error"} | ${fieldMessages.join(" | ")}`;
 }
 
 function sanitizeToolCalls(value: unknown): AgentToolCall[] {
@@ -1014,99 +220,50 @@ function sanitizeToolCalls(value: unknown): AgentToolCall[] {
     return [];
   }
 
-  const calls: AgentToolCall[] = [];
-
-  for (const item of value) {
-    if (!isRecord(item) || typeof item.tool !== "string") {
-      continue;
+  return value.flatMap((item) => {
+    if (!isRecord(item)) {
+      return [];
     }
 
-    calls.push({
-      tool: item.tool,
-      args: isRecord(item.args) ? item.args : {},
-      reason: typeof item.reason === "string" ? item.reason : undefined,
-    });
-  }
-
-  return calls;
-}
-
-function getObjectIdCandidate(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  if (!/^[a-fA-F0-9]{24}$/.test(value)) {
-    return null;
-  }
-
-  return value;
-}
-
-function dedupeEntityRefs(entities: EntityReference[]): EntityReference[] {
-  const seen = new Set<string>();
-  const unique: EntityReference[] = [];
-
-  for (const item of entities) {
-    const key = `${item.type}:${item.id}`;
-    if (seen.has(key)) {
-      continue;
+    const tool = toOptionalString(item.tool);
+    if (!tool) {
+      return [];
     }
 
-    seen.add(key);
-    unique.push(item);
-  }
-
-  return unique;
+    return [
+      {
+        tool,
+        args: isRecord(item.args) ? item.args : {},
+        reason: toOptionalString(item.reason),
+      },
+    ];
+  });
 }
 
-function collectEntityRefs(value: unknown, bucket: EntityReference[], depth = 0): void {
-  if (depth > 8 || value === null || value === undefined) {
-    return;
+function toExecutedToolResults(value: unknown): ExecutedToolResult[] {
+  if (!Array.isArray(value)) {
+    return [];
   }
 
-  if (Array.isArray(value)) {
-    value.forEach((item) => collectEntityRefs(item, bucket, depth + 1));
-    return;
-  }
-
-  if (!isRecord(value)) {
-    return;
-  }
-
-  const id = getObjectIdCandidate(value._id) ?? getObjectIdCandidate(value.id);
-  if (id) {
-    if (typeof value.firstName === "string" && typeof value.lastName === "string") {
-      bucket.push({
-        type: "patient",
-        id,
-        label: `${value.firstName} ${value.lastName}`,
-        hint: typeof value.cin === "string" ? `CIN ${value.cin}` : undefined,
-      });
-    } else if (typeof value.fullName === "string") {
-      bucket.push({
-        type: "doctor",
-        id,
-        label: value.fullName,
-        hint: typeof value.specialty === "string" ? value.specialty : undefined,
-      });
-    } else if (typeof value.reason === "string" && typeof value.startAt === "string") {
-      bucket.push({
-        type: "appointment",
-        id,
-        label: value.reason,
-        hint: `Start ${formatDateTime(value.startAt)}`,
-      });
+  return value.flatMap((item) => {
+    if (!isRecord(item)) {
+      return [];
     }
-  }
 
-  Object.values(value).forEach((nested) => collectEntityRefs(nested, bucket, depth + 1));
-}
+    const tool = toOptionalString(item.tool);
+    if (!tool) {
+      return [];
+    }
 
-function extractEntityRefs(payload: unknown): EntityReference[] {
-  const bucket: EntityReference[] = [];
-  collectEntityRefs(payload, bucket);
-  return dedupeEntityRefs(bucket);
+    return [
+      {
+        tool,
+        args: isRecord(item.args) ? item.args : undefined,
+        result: item.result,
+        error: toOptionalString(item.error),
+      },
+    ];
+  });
 }
 
 function truncateText(value: string, maxLength: number): string {
@@ -1117,264 +274,547 @@ function truncateText(value: string, maxLength: number): string {
   return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
-function entityKey(entry: EntityReference): string {
-  return `${entry.type}:${entry.id}`;
+function humanizeToolName(tool: string): string {
+  return tool.replaceAll("_", " ").trim();
 }
 
-function contextItemKindClass(kind: ContextItemKind): string {
-  if (kind === "history") {
-    return "bg-[#edf7ff] text-[#1a56a8]";
+function pickListPreviewLabel(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value.trim() || null;
   }
 
-  if (kind === "entity") {
-    return "bg-[#ecfdf3] text-[#176742]";
+  if (!isRecord(value)) {
+    return null;
   }
 
-  return "bg-[#fff4e8] text-[#9a4f00]";
+  const firstName = toOptionalString(value.firstName);
+  const lastName = toOptionalString(value.lastName);
+  if (firstName || lastName) {
+    return `${firstName ?? ""} ${lastName ?? ""}`.trim();
+  }
+
+  return (
+    toOptionalString(value.name) ??
+    toOptionalString(value.fullName) ??
+    toOptionalString(value.title) ??
+    toOptionalString(value.reason) ??
+    toOptionalString(value.cin) ??
+    null
+  );
 }
 
-function contextItemKindLabel(kind: ContextItemKind): string {
-  if (kind === "history") {
-    return "History";
+function summarizeSingleToolResult(tool: string, result: unknown): string {
+  if (tool === "search_medical_records_RAG" || tool === "search_global_knowledge_RAG") {
+    if (isRecord(result) && Array.isArray(result.matches)) {
+      const matches = result.matches;
+      if (matches.length === 0) {
+        return "No relevant context found.";
+      }
+
+      const first = matches[0];
+      if (isRecord(first) && typeof first.content === "string") {
+        return `${matches.length} context chunk(s) found. Top match: \"${truncateText(
+          first.content.replace(/\s+/g, " ").trim(),
+          180,
+        )}\"`;
+      }
+
+      return `${matches.length} context chunk(s) found.`;
+    }
   }
 
-  if (kind === "entity") {
-    return "Entities";
+  if (isRecord(result)) {
+    const explicitMessage = toOptionalString(result.message);
+    if (explicitMessage) {
+      return explicitMessage;
+    }
+
+    const preferredArrayKey = ["patients", "doctors", "appointments", "matches"].find((key) =>
+      Array.isArray(result[key]),
+    );
+
+    if (preferredArrayKey) {
+      const entries = result[preferredArrayKey] as unknown[];
+      if (entries.length === 0) {
+        return `${preferredArrayKey} list is empty.`;
+      }
+
+      const previews = entries
+        .map((entry) => pickListPreviewLabel(entry))
+        .filter((label): label is string => Boolean(label))
+        .slice(0, 3);
+
+      if (previews.length > 0) {
+        return `${entries.length} item(s). Example: ${previews.join(" | ")}${
+          entries.length > previews.length ? " | ..." : ""
+        }`;
+      }
+
+      return `${entries.length} item(s) returned.`;
+    }
+
+    const genericArrayEntry = Object.entries(result).find(([, value]) => Array.isArray(value));
+    if (genericArrayEntry) {
+      const [key, value] = genericArrayEntry;
+      return `${Array.isArray(value) ? value.length : 0} ${key} item(s) returned.`;
+    }
+
+    const idCandidate = toOptionalString(result._id) ?? toOptionalString(result.id);
+    if (idCandidate) {
+      return `Completed (id: ${idCandidate}).`;
+    }
+
+    const preview = truncateText(JSON.stringify(result), 220);
+    return preview;
   }
 
-  return "Pending";
+  if (Array.isArray(result)) {
+    return `${result.length} item(s) returned.`;
+  }
+
+  if (typeof result === "string") {
+    return result;
+  }
+
+  if (typeof result === "number" || typeof result === "boolean") {
+    return String(result);
+  }
+
+  return "Completed.";
 }
 
-function contextPresetLabel(preset: ContextPreset): string {
-  if (preset === "full") {
-    return "Full";
-  }
-
-  if (preset === "history-only") {
-    return "History only";
-  }
-
-  if (preset === "entities-only") {
-    return "Entities only";
-  }
-
-  if (preset === "pending-only") {
-    return "Pending only";
-  }
-
-  return "Custom";
-}
-
-function excludedKeysForPreset(
-  preset: Exclude<ContextPreset, "custom">,
-  items: ConversationContextItem[],
-): string[] {
-  if (preset === "full") {
+function summarizeToolExecutionLines(results: unknown): string[] {
+  const toolResults = toExecutedToolResults(results);
+  if (toolResults.length === 0) {
     return [];
   }
 
-  if (preset === "history-only") {
-    return items.filter((item) => item.kind !== "history").map((item) => item.key);
-  }
-
-  if (preset === "entities-only") {
-    return items.filter((item) => item.kind !== "entity").map((item) => item.key);
-  }
-
-  return items.filter((item) => item.kind !== "pending").map((item) => item.key);
-}
-
-function buildConversationContextPack(input: {
-  role: UserRole;
-  mode: PromptMode;
-  history: HistoryItem[];
-  entities: EntityReference[];
-  pinnedKeys: Set<string>;
-  excludedContextKeys: Set<string>;
-  pendingAction: PendingActionState | null;
-}): ConversationContextPack {
-  const historyWindow = input.history.slice(0, MAX_CONTEXT_HISTORY_ITEMS).reverse();
-  const historyItems: ConversationContextItem[] = historyWindow.map((item, index) => {
-    const compactText = item.text.replace(/\s+/g, " ").trim();
-    const line = `${index + 1}. [${item.kind}] ${item.title}: ${truncateText(compactText, 180)}`;
-
-    return {
-      key: `history:${item.id}`,
-      kind: "history",
-      label: `${item.kind} · ${truncateText(item.title, 36)}`,
-      line,
-    };
-  });
-
-  const sortedEntities = [...input.entities].sort((left, right) => {
-    const leftPinned = input.pinnedKeys.has(entityKey(left));
-    const rightPinned = input.pinnedKeys.has(entityKey(right));
-
-    if (leftPinned === rightPinned) {
-      return 0;
+  const lines = toolResults.map((entry) => {
+    if (entry.error) {
+      return `- ${humanizeToolName(entry.tool)}: Failed (${entry.error})`;
     }
 
-    return leftPinned ? -1 : 1;
+    return `- ${humanizeToolName(entry.tool)}: ${summarizeSingleToolResult(entry.tool, entry.result)}`;
   });
 
-  const entityItems: ConversationContextItem[] = sortedEntities
-    .slice(0, MAX_CONTEXT_ENTITY_ITEMS)
-    .map((item) => {
-      const pinnedTag = input.pinnedKeys.has(entityKey(item)) ? " [pinned]" : "";
-      const hint = item.hint ? ` (${item.hint})` : "";
+  return ["Tool results:", ...lines];
+}
 
-      return {
-        key: `entity:${entityKey(item)}`,
-        kind: "entity",
-        label: `${item.type} · ${truncateText(item.label, 36)}`,
-        line: `- ${item.type}: ${item.label} | id=${item.id}${hint}${pinnedTag}`,
-      };
-    });
+function summarizeExecutionResult(result: AgentExecutionResult): string {
+  if (result.requiresConfirmation && result.pendingActionId) {
+    const callSummary = sanitizeToolCalls(result.plannedToolCalls)
+      .map((call) => call.tool)
+      .join(", ");
 
-  const pendingItem: ConversationContextItem | undefined = input.pendingAction
-    ? {
-        key: `pending:${input.pendingAction.id}`,
-        kind: "pending",
-        label: "pending destructive action",
-        line: `- Pending destructive action id=${input.pendingAction.id}${
-          input.pendingAction.expiresAt ? `, expires=${input.pendingAction.expiresAt}` : ""
-        }`,
-      }
-    : undefined;
+    const callLine = callSummary ? `Planned tools: ${callSummary}.` : "";
+    return [result.message ?? "This action requires confirmation before execution.", callLine]
+      .filter((line) => line.length > 0)
+      .join(" ");
+  }
 
-  const items = [...historyItems, ...entityItems, ...(pendingItem ? [pendingItem] : [])];
-  const includedItems = items.filter((item) => !input.excludedContextKeys.has(item.key));
+  const readableLines: string[] = [];
 
-  const historyLines = includedItems
-    .filter((item) => item.kind === "history")
-    .map((item) => item.line);
-  const entityLines = includedItems
-    .filter((item) => item.kind === "entity")
-    .map((item) => item.line);
-  const pendingLine = includedItems.find((item) => item.kind === "pending")?.line;
+  const finalMessage = toOptionalString(result.finalMessage);
+  if (finalMessage) {
+    readableLines.push(finalMessage);
+  } else {
+    const message = toOptionalString(result.message);
+    if (message) {
+      readableLines.push(message);
+    }
+  }
 
-  const sections = [
-    "Conversation memory for continuity.",
-    `Requester role: ${input.role}`,
-    `Current frontend mode: ${input.mode}`,
-    "",
-    "Recent interaction history:",
-    historyLines.length > 0 ? historyLines.join("\n") : "- none",
-    "",
-    "Known IDs and entities:",
-    entityLines.length > 0 ? entityLines.join("\n") : "- none",
-    "",
-    "Pending action status:",
-    pendingLine ?? "- none",
-    "",
-    "Use this memory only when relevant to the new request.",
-    "If ambiguous, prefer safe non-destructive clarification first.",
-  ];
+  const toolSummaryLines = summarizeToolExecutionLines(result.results);
+  if (toolSummaryLines.length > 0) {
+    readableLines.push(...toolSummaryLines);
+  }
 
-  const text = truncateText(sections.join("\n"), MAX_CONTEXT_CHARACTERS);
+  if (readableLines.length === 0) {
+    return "Done. Execution completed.";
+  }
 
+  return readableLines.join("\n");
+}
+
+function summarizeConfirmResult(result: AgentConfirmResult): string {
+  const lines = [result.message];
+  const toolSummaryLines = summarizeToolExecutionLines(result.results);
+  if (toolSummaryLines.length > 0) {
+    lines.push(...toolSummaryLines);
+  }
+
+  return lines.join("\n");
+}
+
+function buildPromptWithMode(input: {
+  mode: PromptMode;
+  prompt: string;
+  scope: ChatScope;
+  folder?: PatientFolder;
+}): string {
+  const modeInstruction =
+    input.mode === "fetch"
+      ? "Mode: Fetch and summarize data only unless the user explicitly requests mutation."
+      : "Mode: Insert or update data when needed. If destructive, require pending confirmation.";
+
+  const ragScopeInstruction =
+    input.scope === "global"
+      ? [
+          "RAG Scope:",
+          "- Primary: Global Knowledge RAG",
+          "- Use tool search_global_knowledge_RAG when contextual evidence is needed.",
+        ].join("\n")
+      : [
+          "RAG Scope:",
+          "- Primary: Patient-specific RAG for the active patient folder",
+          "- Secondary fallback: Global Knowledge RAG",
+          "- Use search_medical_records_RAG with this patientId first, then search_global_knowledge_RAG if needed.",
+          `- Active patientId: ${input.folder?.patientId ?? "unknown"}`,
+          `- Active folder: ${input.folder?.name ?? "unknown"}`,
+        ].join("\n");
+
+  return [modeInstruction, ragScopeInstruction, "Current user request:", input.prompt].join("\n\n");
+}
+
+function roleBadgeClass(role: UserRole): string {
+  if (role === "admin") {
+    return "bg-[#fff0d8] text-[#8a5a00]";
+  }
+
+  if (role === "doctor") {
+    return "bg-[#e8f1ff] text-[#1c4e98]";
+  }
+
+  if (role === "nurse") {
+    return "bg-[#eaf9ef] text-[#1a6a3f]";
+  }
+
+  return "bg-[#eee9ff] text-[#5a44a8]";
+}
+
+function messageBubbleClass(role: MessageRole): string {
+  if (role === "user") {
+    return "ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-[#2f2a21] px-4 py-3 text-[#f8f5ef]";
+  }
+
+  if (role === "system") {
+    return "max-w-[88%] rounded-2xl border border-[#f2d8a8] bg-[#fff7e7] px-4 py-3 text-[#7d5200]";
+  }
+
+  return "max-w-[88%] rounded-2xl border border-[#e3dbcf] bg-[#ffffff] px-4 py-3 text-[#2f2a21]";
+}
+
+function ScopeIcon(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+      <circle cx="10" cy="10" r="7" stroke="currentColor" strokeWidth="1.8" />
+      <circle cx="10" cy="10" r="2" fill="currentColor" />
+    </svg>
+  );
+}
+
+function UploadIcon(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+      <path d="M10 13V4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M6.5 7.5L10 4l3.5 3.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M4 14.5h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function UserIcon(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+      <circle cx="10" cy="7" r="3" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M4.5 16c1.3-2.2 3.3-3.3 5.5-3.3S14.2 13.8 15.5 16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ControlsIcon(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+      <path d="M4 6h12M4 10h12M4 14h12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <circle cx="8" cy="6" r="1.1" fill="currentColor" />
+      <circle cx="12" cy="10" r="1.1" fill="currentColor" />
+      <circle cx="9" cy="14" r="1.1" fill="currentColor" />
+    </svg>
+  );
+}
+
+function QuickActionsIcon(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+      <path d="M10.8 2.8 6 9.3h3.1L8.7 17l5.4-6.7h-3.3l.1-7.5Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function FetchIcon(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+      <circle cx="9" cy="9" r="4.2" stroke="currentColor" strokeWidth="1.6" />
+      <path d="m12.3 12.3 3.2 3.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function InsertIcon(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+      <circle cx="10" cy="10" r="6" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M10 7v6M7 10h6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ToolLimitIcon(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+      <rect x="3.5" y="4" width="4.2" height="4.2" rx="1" stroke="currentColor" strokeWidth="1.5" />
+      <rect x="12.3" y="4" width="4.2" height="4.2" rx="1" stroke="currentColor" strokeWidth="1.5" />
+      <rect x="3.5" y="11.8" width="4.2" height="4.2" rx="1" stroke="currentColor" strokeWidth="1.5" />
+      <rect x="12.3" y="11.8" width="4.2" height="4.2" rx="1" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function quickActionIcon(title: string): ReactNode {
+  if (title.toLowerCase().includes("schedule")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+        <rect x="3.5" y="4.5" width="13" height="12" rx="2" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M6.5 3.3v2.2M13.5 3.3v2.2M3.5 8.5h13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (title.toLowerCase().includes("find")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+        <circle cx="8.6" cy="8.6" r="4" stroke="currentColor" strokeWidth="1.6" />
+        <path d="m11.6 11.6 4.1 4.1" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (title.toLowerCase().includes("appointment")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+        <rect x="3.5" y="4.5" width="13" height="12" rx="2" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M10 8.3v4M8 10.3h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (title.toLowerCase().includes("patient") && title.toLowerCase().includes("create")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+        <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M3.5 15c1.2-2 2.8-3 4.5-3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        <path d="M13.5 8v5M11 10.5h5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (title.toLowerCase().includes("patients")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+        <circle cx="7" cy="7.4" r="2.2" stroke="currentColor" strokeWidth="1.5" />
+        <circle cx="13.1" cy="8" r="1.9" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M3.9 14.8c.9-1.6 2.1-2.4 3.3-2.4 1.2 0 2.4.8 3.2 2.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <path d="M11 14.8c.5-1 1.3-1.5 2.3-1.5s1.8.5 2.4 1.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+      <path d="M10 3.5v13M3.5 10h13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function DropdownSection(input: {
+  title: string;
+  subtitle?: string;
+  icon: ReactNode;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}): ReactNode {
+  return (
+    <details
+      open={input.defaultOpen}
+      className="group rounded-xl border border-[#d8ccb6] bg-[#fffaf1] p-3"
+    >
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 [&::-webkit-details-marker]:hidden">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[#d6c9b4] bg-[#f8f1e4] text-[#6b5d47]">
+            {input.icon}
+          </span>
+          <div className="min-w-0">
+            <p className="truncate text-xs font-semibold uppercase tracking-[0.12em] text-[#7e7058]">
+              {input.title}
+            </p>
+            {input.subtitle && <p className="mt-0.5 text-[11px] text-[#85775d]">{input.subtitle}</p>}
+          </div>
+        </div>
+        <span className="text-xs text-[#7f7057] transition-transform group-open:rotate-180">v</span>
+      </summary>
+      <div className="mt-3 border-t border-[#ebe1d1] pt-3">{input.children}</div>
+    </details>
+  );
+}
+
+function getEmptyConversation(): ConversationState {
   return {
-    text,
-    historyLines,
-    entityLines,
-    pendingLine,
-    items,
-    includedCount: includedItems.length,
-    totalCount: items.length,
+    messages: [],
+    pendingAction: null,
   };
 }
 
-function buildPromptWithMode(mode: PromptMode, prompt: string, contextPack?: string): string {
-  const modeInstruction =
-    mode === "fetch"
-      ? "Mode: Fetch and summarize data only unless user explicitly asks for mutation."
-      : "Mode: Insert or update data when needed. If destructive, prepare pending confirmation safely.";
-
-  if (contextPack) {
-    return [
-      modeInstruction,
-      "Conversation context from previous turns:",
-      contextPack,
-      "Current user request:",
-      prompt,
-    ].join("\n\n");
-  }
-
-  if (mode === "fetch") {
-    return [modeInstruction, prompt].join("\n\n");
-  }
-
-  return [modeInstruction, prompt].join("\n\n");
+function isMessageRole(value: unknown): value is MessageRole {
+  return value === "user" || value === "assistant" || value === "system";
 }
 
-const BASE_QUICK_PROMPTS: QuickPrompt[] = [
-  {
-    title: "Today schedule",
-    mode: "fetch",
-    prompt: "Show me today schedule in Africa/Casablanca and summarize by doctor.",
-  },
-  {
-    title: "Find by CIN",
-    mode: "fetch",
-    prompt: "Find patient by CIN AB123456 and show basic profile.",
-  },
-  {
-    title: "Uncontacted patients",
-    mode: "fetch",
-    prompt: "List uncontacted patients for the last 90 days with total count.",
-  },
-  {
-    title: "List doctors",
-    mode: "fetch",
-    prompt: "List all active doctors in the facility with their specialties and IDs.",
-  },
-  {
-    title: "List patients",
-    mode: "fetch",
-    prompt: "List all accessible patients with IDs, CIN, and key profile fields.",
-  },
-  {
-    title: "Create patient",
-    mode: "insert",
-    prompt:
-      "Create a patient with first name Youssef, last name Amrani, CIN AB123456, phone +212600000000, email youssef.amrani@example.com, and pathologies hypertension and asthma.",
-  },
-  {
-    title: "Create appointment",
-    mode: "insert",
-    prompt:
-      "Create an appointment for patient <PATIENT_ID> with doctor <DOCTOR_ID> on 2026-04-20 at 10:00 for post-op follow up, 60 minutes.",
-  },
-  {
-    title: "Add patient note",
-    mode: "insert",
-    prompt: "Add a patient note for <PATIENT_ID>: blood pressure stabilized after medication adjustment.",
-  },
-  {
-    title: "RAG search",
-    mode: "fetch",
-    prompt:
-      "Run RAG search for patient <PATIENT_ID> with query: prior imaging findings related to chest pain.",
-  },
-  {
-    title: "Create doctor account + profile",
-    mode: "insert",
-    prompt:
-      "Create a doctor staff account with name Dr. Lina Haddad, email lina.haddad@clinic.local, password ChangeMe123!, role doctor; then create a doctor profile for Dr. Lina Haddad with specialty Cardiology linked by userEmail lina.haddad@clinic.local.",
-  },
-];
+function parseStoredFolders(raw: string | null): PatientFolder[] {
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.flatMap((item) => {
+      if (!isRecord(item)) {
+        return [];
+      }
+
+      const id = toOptionalString(item.id);
+      const name = toOptionalString(item.name);
+      const patientId = toOptionalString(item.patientId);
+      const createdAt = typeof item.createdAt === "number" ? item.createdAt : Date.now();
+
+      if (!id || !name || !patientId) {
+        return [];
+      }
+
+      return [{ id, name, patientId, createdAt }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function parseStoredConversations(raw: string | null): ConversationMap {
+  if (!raw) {
+    return {
+      [GLOBAL_CONVERSATION_ID]: getEmptyConversation(),
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) {
+      return {
+        [GLOBAL_CONVERSATION_ID]: getEmptyConversation(),
+      };
+    }
+
+    const output: ConversationMap = {};
+
+    for (const [conversationId, value] of Object.entries(parsed)) {
+      if (!isRecord(value)) {
+        continue;
+      }
+
+      const rawMessages = Array.isArray(value.messages) ? value.messages : [];
+      const messages = rawMessages.flatMap((item) => {
+        if (!isRecord(item)) {
+          return [];
+        }
+
+        const id = toOptionalString(item.id);
+        const text = toOptionalString(item.text);
+        const role = item.role;
+        const createdAt = typeof item.createdAt === "number" ? item.createdAt : Date.now();
+
+        if (!id || !text || !isMessageRole(role)) {
+          return [];
+        }
+
+        return [
+          {
+            id,
+            role,
+            text,
+            createdAt,
+            raw: item.raw,
+          } satisfies ChatMessage,
+        ];
+      });
+
+      let pendingAction: PendingActionState | null = null;
+      if (isRecord(value.pendingAction)) {
+        const pendingId = toOptionalString(value.pendingAction.id);
+        if (pendingId) {
+          pendingAction = {
+            id: pendingId,
+            expiresAt: toOptionalString(value.pendingAction.expiresAt),
+            plannedToolCalls: sanitizeToolCalls(value.pendingAction.plannedToolCalls),
+          };
+        }
+      }
+
+      output[conversationId] = {
+        messages,
+        pendingAction,
+      };
+    }
+
+    if (!output[GLOBAL_CONVERSATION_ID]) {
+      output[GLOBAL_CONVERSATION_ID] = getEmptyConversation();
+    }
+
+    return output;
+  } catch {
+    return {
+      [GLOBAL_CONVERSATION_ID]: getEmptyConversation(),
+    };
+  }
+}
+
+function ensureConversation(map: ConversationMap, id: string | null): ConversationState {
+  if (!id) {
+    return getEmptyConversation();
+  }
+
+  return map[id] ?? getEmptyConversation();
+}
+
+function getConversationKey(scope: ChatScope, activeFolderId: string | null): string | null {
+  if (scope === "global") {
+    return GLOBAL_CONVERSATION_ID;
+  }
+
+  return activeFolderId;
+}
 
 export default function Home() {
-  const [token, setToken] = useState<Nullable<string>>(() => {
+  const [token, setToken] = useState<string | null>(() => {
     if (typeof window === "undefined") {
       return null;
     }
 
     return window.localStorage.getItem(TOKEN_STORAGE_KEY);
   });
-  const [currentUser, setCurrentUser] = useState<Nullable<AuthUser>>(null);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState<Nullable<Feedback>>(null);
+  const [feedback, setFeedback] = useState<string | null>(null);
 
   const [bootstrapForm, setBootstrapForm] = useState({
     bootstrapKey: "",
@@ -1382,83 +822,169 @@ export default function Home() {
     email: "",
     password: "",
   });
-
   const [loginForm, setLoginForm] = useState({
     email: "",
     password: "",
   });
 
-  const [promptMode, setPromptMode] = useState<PromptMode>("fetch");
-  const [promptText, setPromptText] = useState("");
-  const [maxToolCalls, setMaxToolCalls] = useState(3);
-  const [uploadForm, setUploadForm] = useState<{
-    patientId: string;
-    mode: AIRecordMode;
-    title: string;
-    prompt: string;
-  }>({
-    patientId: "",
-    mode: "rag",
-    title: "",
-    prompt: "",
+  const [chatScope, setChatScope] = useState<ChatScope>(() => {
+    if (typeof window === "undefined") {
+      return "global";
+    }
+
+    const stored = window.localStorage.getItem(CHAT_SCOPE_STORAGE_KEY);
+    return stored === "patient" ? "patient" : "global";
   });
-  const [ragRetentionPatientId, setRagRetentionPatientId] = useState("");
-  const [ragRecords, setRagRecords] = useState<RAGRecordListItem[]>([]);
-  const [keptRagRecordIds, setKeptRagRecordIds] = useState<string[]>([]);
-  const [ragManagerBusy, setRagManagerBusy] = useState(false);
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
-  const [fileInputKey, setFileInputKey] = useState(0);
-  const [contextEnabled, setContextEnabled] = useState(true);
-  const [showContextPreview, setShowContextPreview] = useState(false);
-  const [excludedContextItemKeys, setExcludedContextItemKeys] = useState<string[]>([]);
-  const [contextPreset, setContextPreset] = useState<ContextPreset>("full");
-  const [collapsedContextGroups, setCollapsedContextGroups] = useState<
-    Record<ContextItemKind, boolean>
-  >({
-    history: false,
-    entity: false,
-    pending: false,
+
+  const [folders, setFolders] = useState<PatientFolder[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
+
+    return parseStoredFolders(window.localStorage.getItem(PATIENT_FOLDERS_STORAGE_KEY));
   });
-  const [pinnedEntityKeys, setPinnedEntityKeys] = useState<string[]>([]);
 
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [pendingAction, setPendingAction] = useState<Nullable<PendingActionState>>(null);
-  const [lastResult, setLastResult] = useState<Nullable<unknown>>(null);
-  const [entityMemory, setEntityMemory] = useState<EntityReference[]>([]);
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
 
-  const showFeedback = useCallback((type: FeedbackType, message: string) => {
-    setFeedback({ type, message });
-  }, []);
+    const parsedFolders = parseStoredFolders(
+      window.localStorage.getItem(PATIENT_FOLDERS_STORAGE_KEY),
+    );
+    const stored = window.localStorage.getItem(ACTIVE_FOLDER_STORAGE_KEY);
 
-  const pushHistory = useCallback((item: Omit<HistoryItem, "id" | "createdAt">) => {
-    setHistory((previous) => {
-      const nextEntry: HistoryItem = {
-        ...item,
-        id: createId("history"),
-        createdAt: Date.now(),
+    if (stored && parsedFolders.some((folder) => folder.id === stored)) {
+      return stored;
+    }
+
+    return parsedFolders[0]?.id ?? null;
+  });
+
+  const [conversations, setConversations] = useState<ConversationMap>(() => {
+    if (typeof window === "undefined") {
+      return {
+        [GLOBAL_CONVERSATION_ID]: getEmptyConversation(),
       };
+    }
 
-      return [nextEntry, ...previous].slice(0, MAX_HISTORY_ITEMS);
+    return parseStoredConversations(window.localStorage.getItem(CONVERSATIONS_STORAGE_KEY));
+  });
+
+  const [promptMode, setPromptMode] = useState<PromptMode>("fetch");
+  const [maxToolCalls, setMaxToolCalls] = useState(3);
+  const [promptInput, setPromptInput] = useState("");
+
+  const [showFolderForm, setShowFolderForm] = useState(false);
+  const [newFolderForm, setNewFolderForm] = useState({
+    name: "",
+    patientId: "",
+  });
+
+  const [globalRagFiles, setGlobalRagFiles] = useState<File[]>([]);
+  const [globalRagNote, setGlobalRagNote] = useState("");
+
+  const [patientRagFiles, setPatientRagFiles] = useState<File[]>([]);
+  const [patientRagPrompt, setPatientRagPrompt] = useState("");
+  const [ragUploadMode, setRagUploadMode] = useState<RagUploadMode>("global");
+
+  const chatContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const activeFolder = useMemo(
+    () => folders.find((folder) => folder.id === activeFolderId) ?? null,
+    [activeFolderId, folders],
+  );
+
+  const activeConversationKey = useMemo(
+    () => getConversationKey(chatScope, activeFolderId),
+    [chatScope, activeFolderId],
+  );
+
+  const activeConversation = useMemo(
+    () => ensureConversation(conversations, activeConversationKey),
+    [activeConversationKey, conversations],
+  );
+
+  const quickActions = useMemo(() => QUICK_ACTIONS, []);
+
+  const folderStats = useMemo(() => {
+    return folders.map((folder) => {
+      const conversation = ensureConversation(conversations, folder.id);
+      const lastMessage = conversation.messages[conversation.messages.length - 1];
+
+      return {
+        folderId: folder.id,
+        messageCount: conversation.messages.length,
+        lastMessageAt: lastMessage?.createdAt,
+      };
     });
+  }, [conversations, folders]);
+
+  const appendMessageToConversation = useCallback(
+    (conversationId: string | null, message: Omit<ChatMessage, "id" | "createdAt">) => {
+      if (!conversationId) {
+        return;
+      }
+
+      setConversations((current) => {
+        const existing = ensureConversation(current, conversationId);
+
+        return {
+          ...current,
+          [conversationId]: {
+            ...existing,
+            messages: [
+              ...existing.messages,
+              {
+                ...message,
+                id: createId("msg"),
+                createdAt: Date.now(),
+              },
+            ],
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const setPendingActionForConversation = useCallback(
+    (conversationId: string | null, pendingAction: PendingActionState | null) => {
+      if (!conversationId) {
+        return;
+      }
+
+      setConversations((current) => ({
+        ...current,
+        [conversationId]: {
+          ...ensureConversation(current, conversationId),
+          pendingAction,
+        },
+      }));
+    },
+    [],
+  );
+
+  const clearConversation = useCallback((conversationId: string | null) => {
+    if (!conversationId) {
+      return;
+    }
+
+    setConversations((current) => ({
+      ...current,
+      [conversationId]: {
+        ...ensureConversation(current, conversationId),
+        messages: [],
+        pendingAction: null,
+      },
+    }));
   }, []);
 
   const clearSession = useCallback(() => {
     setToken(null);
     setCurrentUser(null);
-    setHistory([]);
-    setPendingAction(null);
-    setLastResult(null);
-    setEntityMemory([]);
-    setPinnedEntityKeys([]);
-    setExcludedContextItemKeys([]);
-    setContextPreset("full");
-    setCollapsedContextGroups({
-      history: false,
-      entity: false,
-      pending: false,
-    });
-    setContextEnabled(true);
-    setShowContextPreview(false);
+    setPromptInput("");
+    setFeedback(null);
 
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(TOKEN_STORAGE_KEY);
@@ -1489,8 +1015,8 @@ export default function Home() {
         headers.set("Idempotency-Key", options.idempotencyKey);
       }
 
-      const requestUrl = buildApiUrl(path);
       const requestMethod = options?.method ?? "GET";
+      const requestUrl = buildApiUrl(path);
 
       let response: Response;
       try {
@@ -1501,13 +1027,12 @@ export default function Home() {
           cache: "no-store",
         });
       } catch (error) {
-        throw new Error(`Network error for ${requestMethod} ${requestUrl}: ${extractErrorMessage(error)}`);
+        throw new Error(
+          `Network error for ${requestMethod} ${requestUrl}: ${extractErrorMessage(error)}`,
+        );
       }
 
-      const payload = (await response.json().catch(() => null)) as (ApiEnvelope<T> & {
-        issues?: unknown;
-        details?: unknown;
-      }) | null;
+      const payload = (await response.json().catch(() => null)) as ApiEnvelope<T> | null;
 
       if (!response.ok) {
         if (response.status === 401 && token) {
@@ -1519,95 +1044,17 @@ export default function Home() {
           payload?.message ??
           `Request failed with status ${response.status}`;
 
-        throw new Error(
-          `${baseMessage} | HTTP ${response.status} ${requestMethod} ${requestUrl}`,
-        );
+        throw new Error(`${baseMessage} | HTTP ${response.status} ${requestMethod} ${requestUrl}`);
       }
 
-      return payload?.data as T;
+      if (!payload) {
+        throw new Error(`Empty API response for ${requestMethod} ${requestUrl}`);
+      }
+
+      return payload.data;
     },
     [clearSession, token],
   );
-
-  const loadPersistentHistory = useCallback(async () => {
-    const rawEntries = await apiRequest<unknown[]>("/agent/history?limit=40&includeFailures=true");
-    const entries = parseAgentHistoryEntries(rawEntries);
-    if (entries.length === 0) {
-      return;
-    }
-
-    const hydratedHistory: HistoryItem[] = [];
-    const memoryPayloads: unknown[] = [];
-
-    entries.forEach((entry, index) => {
-      const promptText = extractUserRequestFromStoredPrompt(entry.prompt);
-      const parsedTimestamp = new Date(entry.createdAt).getTime();
-      const createdAt =
-        Number.isFinite(parsedTimestamp) && !Number.isNaN(parsedTimestamp)
-          ? parsedTimestamp
-          : Date.now() - index * 2;
-
-      const promptTitle = /\bmode:\s*insert\b/i.test(entry.prompt)
-        ? "Saved insert command"
-        : "Saved fetch command";
-
-      hydratedHistory.push({
-        id: `persist:prompt:${entry.id}`,
-        kind: "prompt",
-        title: promptTitle,
-        text: promptText || truncateText(normalizeSummaryText(entry.prompt), 700),
-        createdAt: createdAt - 1,
-      });
-
-      const payloadForHistory: AgentExecutionResult = {
-        requiresConfirmation: entry.requiresConfirmation,
-        results: entry.toolResults.map((item) => ({
-          tool: item.tool,
-          args: isRecord(item.args) ? item.args : {},
-          result: item.result,
-        })),
-        finalMessage: entry.errorMessage,
-      };
-
-      memoryPayloads.push(payloadForHistory);
-
-      const formattedConversationText = entry.success
-        ? formatConversationResultText(payloadForHistory, promptText)
-        : null;
-
-      const fallbackSuccessText =
-        (toOptionalString(entry.plannerResponse) ?? "Saved execution result.") +
-        ` Tool calls: ${entry.toolResults.length}.`;
-
-      hydratedHistory.push({
-        id: `persist:result:${entry.id}`,
-        kind: entry.success ? "result" : "system",
-        title: entry.success ? "Saved execution result" : "Saved execution error",
-        text:
-          formattedConversationText ??
-          entry.errorMessage ??
-          (entry.success ? fallbackSuccessText : "Saved execution failed."),
-        payload: payloadForHistory,
-        createdAt,
-      });
-    });
-
-    hydratedHistory.sort((left, right) => right.createdAt - left.createdAt);
-
-    setHistory((current) =>
-      current.length > 0 ? current : hydratedHistory.slice(0, MAX_HISTORY_ITEMS),
-    );
-
-    const extractedEntities = dedupeEntityRefs(
-      memoryPayloads.flatMap((payload) => extractEntityRefs(payload)),
-    ).slice(0, MAX_ENTITY_MEMORY);
-
-    if (extractedEntities.length > 0) {
-      setEntityMemory((current) => (current.length > 0 ? current : extractedEntities));
-    }
-
-    showFeedback("info", `Loaded ${entries.length} persisted history record(s).`);
-  }, [apiRequest, showFeedback]);
 
   const loadCurrentUser = useCallback(async () => {
     if (!token) {
@@ -1617,20 +1064,11 @@ export default function Home() {
     try {
       const user = await apiRequest<AuthUser>("/auth/me");
       setCurrentUser(user);
-
-      try {
-        await loadPersistentHistory();
-      } catch (historyError) {
-        showFeedback(
-          "error",
-          `Unable to load persisted history: ${extractErrorMessage(historyError)}`,
-        );
-      }
     } catch (error) {
       clearSession();
-      showFeedback("error", extractErrorMessage(error));
+      setFeedback(extractErrorMessage(error));
     }
-  }, [apiRequest, clearSession, loadPersistentHistory, showFeedback, token]);
+  }, [apiRequest, clearSession, token]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1659,163 +1097,56 @@ export default function Home() {
     };
   }, [loadCurrentUser, token]);
 
-  const applyOutcomeToMemory = useCallback((payload: unknown) => {
-    const extracted = extractEntityRefs(payload);
-    if (extracted.length === 0) {
+  useEffect(() => {
+    if (typeof window === "undefined") {
       return;
     }
 
-    setEntityMemory((current) => {
-      const merged = dedupeEntityRefs([...extracted, ...current]).slice(0, MAX_ENTITY_MEMORY);
+    window.localStorage.setItem(CHAT_SCOPE_STORAGE_KEY, chatScope);
+  }, [chatScope]);
 
-      setPinnedEntityKeys((existingKeys) => {
-        const available = new Set(merged.map((item) => entityKey(item)));
-        return existingKeys.filter((key) => available.has(key));
-      });
-
-      return merged;
-    });
-  }, []);
-
-  const clearConversationMemory = useCallback(() => {
-    setHistory([]);
-    setPendingAction(null);
-    setLastResult(null);
-    setEntityMemory([]);
-    setPinnedEntityKeys([]);
-    setExcludedContextItemKeys([]);
-    setContextPreset("full");
-    showFeedback("info", "Conversation memory cleared.");
-  }, [showFeedback]);
-
-  const handleTogglePinnedEntity = useCallback((entry: EntityReference) => {
-    const key = entityKey(entry);
-
-    setPinnedEntityKeys((current) => {
-      if (current.includes(key)) {
-        return current.filter((item) => item !== key);
-      }
-
-      return [key, ...current].slice(0, MAX_ENTITY_MEMORY);
-    });
-  }, []);
-
-  const pinnedEntityKeySet = useMemo(() => new Set(pinnedEntityKeys), [pinnedEntityKeys]);
-  const excludedContextKeySet = useMemo(
-    () => new Set(excludedContextItemKeys),
-    [excludedContextItemKeys],
-  );
-
-  const contextPack = useMemo<ConversationContextPack>(() => {
-    if (!currentUser) {
-      return {
-        text: "",
-        historyLines: [],
-        entityLines: [],
-        items: [],
-        includedCount: 0,
-        totalCount: 0,
-      };
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
     }
 
-    return buildConversationContextPack({
-      role: currentUser.role,
-      mode: promptMode,
-      history,
-      entities: entityMemory,
-      pinnedKeys: pinnedEntityKeySet,
-      excludedContextKeys: excludedContextKeySet,
-      pendingAction,
-    });
-  }, [
-    currentUser,
-    promptMode,
-    history,
-    entityMemory,
-    pinnedEntityKeySet,
-    excludedContextKeySet,
-    pendingAction,
-  ]);
+    window.localStorage.setItem(PATIENT_FOLDERS_STORAGE_KEY, JSON.stringify(folders));
+  }, [folders]);
 
-  const handleToggleContextItem = useCallback((key: string) => {
-    setContextPreset("custom");
-    setExcludedContextItemKeys((current) => {
-      if (current.includes(key)) {
-        return current.filter((item) => item !== key);
-      }
-
-      return [key, ...current];
-    });
-  }, []);
-
-  const handleIncludeAllContextItems = useCallback(() => {
-    setExcludedContextItemKeys([]);
-    setContextPreset("full");
-  }, []);
-
-  const handleExcludeAllContextItems = useCallback(() => {
-    setContextPreset("custom");
-    setExcludedContextItemKeys(contextPack.items.map((item) => item.key));
-  }, [contextPack.items]);
-
-  const handleApplyContextPreset = useCallback(
-    (preset: Exclude<ContextPreset, "custom">) => {
-      setContextPreset(preset);
-      setExcludedContextItemKeys(excludedKeysForPreset(preset, contextPack.items));
-    },
-    [contextPack.items],
-  );
-
-  const groupedContextItems = useMemo<Record<ContextItemKind, ConversationContextItem[]>>(() => {
-    const grouped: Record<ContextItemKind, ConversationContextItem[]> = {
-      history: [],
-      entity: [],
-      pending: [],
-    };
-
-    for (const item of contextPack.items) {
-      grouped[item.kind].push(item);
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
     }
 
-    return grouped;
-  }, [contextPack.items]);
+    if (!activeFolderId) {
+      window.localStorage.removeItem(ACTIVE_FOLDER_STORAGE_KEY);
+      return;
+    }
 
-  const handleToggleContextGroup = useCallback((kind: ContextItemKind) => {
-    setCollapsedContextGroups((current) => ({
-      ...current,
-      [kind]: !current[kind],
-    }));
-  }, []);
+    window.localStorage.setItem(ACTIVE_FOLDER_STORAGE_KEY, activeFolderId);
+  }, [activeFolderId]);
 
-  const handleIncludeContextGroup = useCallback(
-    (kind: ContextItemKind) => {
-      const keys = groupedContextItems[kind].map((item) => item.key);
-      if (keys.length === 0) {
-        return;
-      }
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
 
-      setContextPreset("custom");
-      setExcludedContextItemKeys((current) => current.filter((key) => !keys.includes(key)));
-    },
-    [groupedContextItems],
-  );
+    window.localStorage.setItem(CONVERSATIONS_STORAGE_KEY, JSON.stringify(conversations));
+  }, [conversations]);
 
-  const handleExcludeContextGroup = useCallback(
-    (kind: ContextItemKind) => {
-      const keys = groupedContextItems[kind].map((item) => item.key);
-      if (keys.length === 0) {
-        return;
-      }
+  useEffect(() => {
+    const container = chatContainerRef.current;
+    if (!container) {
+      return;
+    }
 
-      setContextPreset("custom");
-      setExcludedContextItemKeys((current) => Array.from(new Set([...current, ...keys])));
-    },
-    [groupedContextItems],
-  );
+    container.scrollTop = container.scrollHeight;
+  }, [activeConversation.messages]);
 
   const handleBootstrapAdmin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setBusy(true);
+    setFeedback(null);
 
     try {
       await apiRequest<AuthUser>("/auth/bootstrap-admin", {
@@ -1823,10 +1154,10 @@ export default function Home() {
         body: JSON.stringify(bootstrapForm),
       });
 
-      showFeedback("success", "Admin bootstrapped. You can now login.");
+      setFeedback("Admin created successfully. You can now log in.");
       setBootstrapForm({ bootstrapKey: "", name: "", email: "", password: "" });
     } catch (error) {
-      showFeedback("error", extractErrorMessage(error));
+      setFeedback(extractErrorMessage(error));
     } finally {
       setBusy(false);
     }
@@ -1835,6 +1166,7 @@ export default function Home() {
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setBusy(true);
+    setFeedback(null);
 
     try {
       const result = await apiRequest<LoginResponse>("/auth/login", {
@@ -1844,10 +1176,10 @@ export default function Home() {
 
       setToken(result.accessToken);
       setCurrentUser(result.user);
-      showFeedback("success", "Login successful.");
       setLoginForm({ email: "", password: "" });
+      setFeedback("Welcome back.");
     } catch (error) {
-      showFeedback("error", extractErrorMessage(error));
+      setFeedback(extractErrorMessage(error));
     } finally {
       setBusy(false);
     }
@@ -1862,104 +1194,214 @@ export default function Home() {
         body: JSON.stringify({}),
       });
     } catch {
-      // Ignore network or backend logout failures and still clear client state.
+      // Ignore logout errors and clear local session anyway.
     } finally {
       clearSession();
       setBusy(false);
-      showFeedback("info", "Logged out.");
     }
   };
 
-  const executeAgentPrompt = async () => {
-    const trimmed = promptText.trim();
-    if (!trimmed) {
-      showFeedback("error", "Please enter a prompt.");
+  const handleCreateFolder = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const name = newFolderForm.name.trim();
+    const patientId = newFolderForm.patientId.trim();
+
+    if (!name) {
+      setFeedback("Folder name is required.");
       return;
     }
 
-    const finalPrompt = buildPromptWithMode(
-      promptMode,
-      trimmed,
-      contextEnabled && contextPack.includedCount > 0 ? contextPack.text : undefined,
-    );
-    setBusy(true);
+    if (!patientId) {
+      setFeedback("Patient ID is required.");
+      return;
+    }
 
-    pushHistory({
-      kind: "prompt",
-      title: promptMode === "fetch" ? "Fetch command" : "Insert command",
-      text: `${trimmed}\n\nContext enabled: ${contextEnabled ? "yes" : "no"}${
-        contextEnabled
-          ? `\nIncluded context items: ${contextPack.includedCount}/${contextPack.totalCount}\nPreset: ${contextPreset}`
-          : ""
-      }`,
+    if (!/^[a-fA-F0-9]{24}$/.test(patientId)) {
+      setFeedback("Patient ID must be a valid 24-character MongoDB ObjectId.");
+      return;
+    }
+
+    const duplicate = folders.find((folder) => folder.patientId === patientId);
+    if (duplicate) {
+      setActiveFolderId(duplicate.id);
+      setChatScope("patient");
+      setFeedback("This patient already has a folder. Switched to it.");
+      return;
+    }
+
+    const created: PatientFolder = {
+      id: createId("folder"),
+      name,
+      patientId,
+      createdAt: Date.now(),
+    };
+
+    setFolders((current) => [created, ...current]);
+    setConversations((current) => ({
+      ...current,
+      [created.id]: getEmptyConversation(),
+    }));
+    setActiveFolderId(created.id);
+    setChatScope("patient");
+    setShowFolderForm(false);
+    setNewFolderForm({ name: "", patientId: "" });
+    setFeedback("Patient folder created.");
+  };
+
+  const handleDeleteFolder = (folderId: string) => {
+    const folder = folders.find((entry) => entry.id === folderId);
+    if (!folder) {
+      return;
+    }
+
+    if (typeof window !== "undefined") {
+      const confirmed = window.confirm(
+        `Delete folder '${folder.name}' and its chat history? This cannot be undone.`,
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    const remainingFolders = folders.filter((entry) => entry.id !== folderId);
+
+    setFolders(remainingFolders);
+    setConversations((current) => {
+      const next = { ...current };
+      delete next[folderId];
+      return next;
+    });
+
+    if (activeFolderId === folderId) {
+      const nextActiveId = remainingFolders[0]?.id ?? null;
+      setActiveFolderId(nextActiveId);
+      if (!nextActiveId) {
+        setChatScope("global");
+      }
+    }
+
+    setFeedback("Folder deleted.");
+  };
+
+  const handleNewChat = () => {
+    if (!activeConversationKey) {
+      setFeedback("Create or select a patient folder first.");
+      return;
+    }
+
+    clearConversation(activeConversationKey);
+    setPromptInput("");
+    setFeedback("Started a new chat in this context.");
+  };
+
+  const handleQuickAction = (action: { mode: PromptMode; prompt: string }) => {
+    setPromptMode(action.mode);
+
+    if (chatScope === "patient") {
+      if (!activeFolder) {
+        setFeedback("Create or select a patient folder first.");
+        return;
+      }
+
+      setPromptInput(action.prompt.replaceAll("<PATIENT_ID>", activeFolder.patientId));
+      return;
+    }
+
+    const withoutPatientPlaceholder = action.prompt.replaceAll("<PATIENT_ID>", "the relevant patient");
+    setPromptInput(withoutPatientPlaceholder);
+  };
+
+  const executePrompt = async () => {
+    if (!activeConversationKey) {
+      setFeedback("Create or select a patient folder first.");
+      return;
+    }
+
+    if (chatScope === "patient" && !activeFolder) {
+      setFeedback("Create or select a patient folder first.");
+      return;
+    }
+
+    const trimmed = promptInput.trim();
+    if (!trimmed) {
+      setFeedback("Type a message first.");
+      return;
+    }
+
+    setBusy(true);
+    setFeedback(null);
+
+    appendMessageToConversation(activeConversationKey, {
+      role: "user",
+      text: trimmed,
     });
 
     try {
+      const payloadPrompt = buildPromptWithMode({
+        mode: promptMode,
+        prompt: trimmed,
+        scope: chatScope,
+        folder: activeFolder ?? undefined,
+      });
+
       const result = await apiRequest<AgentExecutionResult>("/agent/execute", {
         method: "POST",
         body: JSON.stringify({
-          prompt: finalPrompt,
+          prompt: payloadPrompt,
           maxToolCalls,
         }),
         idempotencyKey: createId("agent-execute"),
       });
 
-      const plannedCalls = sanitizeToolCalls(result.plannedToolCalls);
-      if (result.requiresConfirmation && result.pendingActionId) {
-        setPendingAction({
-          id: result.pendingActionId,
-          expiresAt: result.expiresAt,
-          plannedToolCalls: plannedCalls,
-        });
-      } else {
-        setPendingAction(null);
-      }
+      const plannedToolCalls = sanitizeToolCalls(result.plannedToolCalls);
+      setPendingActionForConversation(
+        activeConversationKey,
+        result.requiresConfirmation && result.pendingActionId
+          ? {
+              id: result.pendingActionId,
+              expiresAt: result.expiresAt,
+              plannedToolCalls,
+            }
+          : null,
+      );
 
-      setLastResult(result);
-      applyOutcomeToMemory(result);
-
-      const formattedConversationText = formatConversationResultText(result, trimmed);
-
-      pushHistory({
-        kind: "result",
-        title: result.requiresConfirmation ? "Confirmation required" : "Execution result",
-        text:
-          formattedConversationText ??
-          result.finalMessage ??
-          result.message ??
-          (result.requiresConfirmation
-            ? "Destructive action is pending your approval."
-            : "Agent completed execution."),
-        payload: result,
+      appendMessageToConversation(activeConversationKey, {
+        role: "assistant",
+        text: summarizeExecutionResult(result),
+        raw: result,
       });
 
-      showFeedback("success", result.message ?? "Agent command processed.");
-      setPromptText("");
+      setPromptInput("");
     } catch (error) {
-      const message = extractErrorMessage(error);
-      pushHistory({
-        kind: "system",
-        title: "Command error",
-        text: message,
+      appendMessageToConversation(activeConversationKey, {
+        role: "system",
+        text: extractErrorMessage(error),
       });
-      showFeedback("error", message);
     } finally {
       setBusy(false);
     }
   };
 
-  const handleExecuteAgent = async (event: FormEvent<HTMLFormElement>) => {
+  const handleSendPrompt = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    await executeAgentPrompt();
+    await executePrompt();
   };
 
   const handleConfirmPendingAction = async (approved: boolean) => {
+    if (!activeConversationKey) {
+      setFeedback("No active conversation context.");
+      return;
+    }
+
+    const pendingAction = ensureConversation(conversations, activeConversationKey).pendingAction;
     if (!pendingAction) {
-      showFeedback("error", "No pending action to confirm.");
+      setFeedback("No pending action in this context.");
       return;
     }
 
     setBusy(true);
+    setFeedback(null);
 
     try {
       const result = await apiRequest<AgentConfirmResult>(`/agent/actions/${pendingAction.id}/confirm`, {
@@ -1968,75 +1410,100 @@ export default function Home() {
         idempotencyKey: createId("agent-confirm"),
       });
 
-      setLastResult(result);
-      applyOutcomeToMemory(result);
-
-      pushHistory({
-        kind: "result",
-        title: approved ? "Pending action approved" : "Pending action rejected",
-        text: result.message,
-        payload: result,
+      appendMessageToConversation(activeConversationKey, {
+        role: approved ? "assistant" : "system",
+        text: summarizeConfirmResult(result),
+        raw: result,
       });
 
-      setPendingAction(null);
-      showFeedback(approved ? "success" : "info", result.message);
+      setPendingActionForConversation(activeConversationKey, null);
     } catch (error) {
-      showFeedback("error", extractErrorMessage(error));
+      appendMessageToConversation(activeConversationKey, {
+        role: "system",
+        text: extractErrorMessage(error),
+      });
     } finally {
       setBusy(false);
     }
   };
 
-  const handleCopyId = async (id: string) => {
-    if (typeof navigator === "undefined" || !navigator.clipboard) {
-      showFeedback("error", "Clipboard API is unavailable in this browser.");
-      return;
-    }
-
-    try {
-      await navigator.clipboard.writeText(id);
-      showFeedback("info", `Copied ID ${id}`);
-    } catch {
-      showFeedback("error", "Unable to copy ID to clipboard.");
-    }
-  };
-
-  const handleUploadFiles = async (event: FormEvent<HTMLFormElement>) => {
+  const handleUploadGlobalRag = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
-    if (!uploadForm.patientId.trim()) {
-      showFeedback("error", "Patient ID is required for file upload.");
+    if (currentUser?.role !== "admin") {
+      setFeedback("Global RAG upload is restricted to admin.");
       return;
     }
 
-    if (selectedFiles.length === 0) {
-      showFeedback("error", "Select at least one file before uploading.");
+    if (globalRagFiles.length === 0) {
+      setFeedback("Select at least one global RAG file.");
       return;
     }
 
     setBusy(true);
-
-    const fileNames = selectedFiles.map((file) => file.name).join(", ");
-    pushHistory({
-      kind: "prompt",
-      title: "File upload command",
-      text: `Mode: ${uploadForm.mode} | Patient: ${uploadForm.patientId} | Files: ${fileNames}`,
-    });
+    setFeedback(null);
 
     try {
       const formData = new FormData();
-      formData.append("patientId", uploadForm.patientId.trim());
-      formData.append("mode", uploadForm.mode);
-
-      if (uploadForm.title.trim()) {
-        formData.append("title", uploadForm.title.trim());
+      if (globalRagNote.trim()) {
+        formData.append("note", globalRagNote.trim());
       }
 
-      if (uploadForm.prompt.trim()) {
-        formData.append("prompt", uploadForm.prompt.trim());
+      globalRagFiles.forEach((file) => {
+        formData.append("files", file);
+      });
+
+      const result = await apiRequest<unknown>("/ai/global/upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      appendMessageToConversation(GLOBAL_CONVERSATION_ID, {
+        role: "assistant",
+        text: `Indexed ${globalRagFiles.length} global RAG file(s) successfully.`,
+        raw: result,
+      });
+
+      setGlobalRagFiles([]);
+      setGlobalRagNote("");
+      setFeedback("Global RAG upload completed.");
+    } catch (error) {
+      setFeedback(extractErrorMessage(error));
+      appendMessageToConversation(GLOBAL_CONVERSATION_ID, {
+        role: "system",
+        text: extractErrorMessage(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUploadPatientRag = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!activeFolder) {
+      setFeedback("Select a patient folder first.");
+      return;
+    }
+
+    if (patientRagFiles.length === 0) {
+      setFeedback("Select at least one patient RAG file.");
+      return;
+    }
+
+    setBusy(true);
+    setFeedback(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("patientId", activeFolder.patientId);
+      formData.append("mode", "rag");
+
+      if (patientRagPrompt.trim()) {
+        formData.append("prompt", patientRagPrompt.trim());
       }
 
-      selectedFiles.forEach((file) => {
+      patientRagFiles.forEach((file) => {
         formData.append("files", file);
       });
 
@@ -2045,1165 +1512,636 @@ export default function Home() {
         body: formData,
       });
 
-      setLastResult(result);
-      applyOutcomeToMemory(result);
-
-      pushHistory({
-        kind: "result",
-        title: "File upload processed",
-        text: `Uploaded ${selectedFiles.length} file(s) and created an AI record (${uploadForm.mode}).`,
-        payload: result,
+      appendMessageToConversation(activeFolder.id, {
+        role: "assistant",
+        text: `Indexed ${patientRagFiles.length} patient RAG file(s) for ${activeFolder.name}.`,
+        raw: result,
       });
 
-      showFeedback("success", "Files uploaded and processed successfully.");
-      setUploadForm((current) => ({
-        ...current,
-        title: "",
-        prompt: "",
-      }));
-      setSelectedFiles([]);
-      setFileInputKey((current) => current + 1);
+      setPatientRagFiles([]);
+      setPatientRagPrompt("");
+      setFeedback("Patient RAG upload completed.");
     } catch (error) {
-      const message = extractErrorMessage(error);
-      pushHistory({
-        kind: "system",
-        title: "File upload error",
-        text: message,
+      setFeedback(extractErrorMessage(error));
+      appendMessageToConversation(activeFolder.id, {
+        role: "system",
+        text: extractErrorMessage(error),
       });
-      showFeedback("error", message);
     } finally {
       setBusy(false);
     }
   };
 
-  const handleLoadRagRecords = useCallback(async () => {
-    const patientId = ragRetentionPatientId.trim();
-    if (!patientId) {
-      showFeedback("error", "Patient ID is required to load RAG records.");
-      return;
-    }
+  if (!token || !currentUser) {
+    return (
+      <div className="min-h-screen bg-[#f5f1e8] px-4 py-8 text-[#2f2a21] sm:px-8">
+        <div className="mx-auto grid w-full max-w-6xl gap-6 lg:grid-cols-[1.1fr_1fr]">
+          <section className="rounded-3xl border border-[#e0d7c8] bg-[#fbf8f1] p-8 shadow-[0_12px_30px_rgba(0,0,0,0.06)]">
+            <p className="text-xs uppercase tracking-[0.18em] text-[#7d6a4e]">MediAssist IA</p>
+            <h1 className="mt-3 text-4xl font-semibold leading-tight text-[#2f2a21]">
+              Global + Patient RAG workspace
+            </h1>
+            <p className="mt-4 max-w-xl text-sm text-[#645841] sm:text-base">
+              Chat globally with AI, or switch to a specific patient folder context with its own
+              isolated history and patient-scoped RAG.
+            </p>
+            <div className="mt-8 rounded-2xl border border-[#e7ddcd] bg-white/70 p-4 text-sm text-[#5f513a]">
+              API base: <span className="font-medium">{API_BASE_URL}</span>
+            </div>
+          </section>
 
-    setRagManagerBusy(true);
+          <section className="rounded-3xl border border-[#e0d7c8] bg-[#fbf8f1] p-6 shadow-[0_12px_30px_rgba(0,0,0,0.06)]">
+            <div className="grid gap-6">
+              <form className="grid gap-3" onSubmit={handleBootstrapAdmin}>
+                <h2 className="text-xl font-semibold text-[#2f2a21]">Bootstrap Admin</h2>
+                <input
+                  className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
+                  placeholder="Bootstrap key"
+                  value={bootstrapForm.bootstrapKey}
+                  onChange={(event) =>
+                    setBootstrapForm((current) => ({ ...current, bootstrapKey: event.target.value }))
+                  }
+                  required
+                />
+                <input
+                  className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
+                  placeholder="Full name"
+                  value={bootstrapForm.name}
+                  onChange={(event) =>
+                    setBootstrapForm((current) => ({ ...current, name: event.target.value }))
+                  }
+                  required
+                />
+                <input
+                  className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
+                  placeholder="Email"
+                  type="email"
+                  value={bootstrapForm.email}
+                  onChange={(event) =>
+                    setBootstrapForm((current) => ({ ...current, email: event.target.value }))
+                  }
+                  required
+                />
+                <input
+                  className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
+                  placeholder="Password"
+                  type="password"
+                  value={bootstrapForm.password}
+                  onChange={(event) =>
+                    setBootstrapForm((current) => ({ ...current, password: event.target.value }))
+                  }
+                  required
+                />
+                <button
+                  type="submit"
+                  className="rounded-xl bg-[#2f2a21] px-4 py-2 text-sm font-medium text-[#f8f4ec]"
+                  disabled={busy}
+                >
+                  {busy ? "Processing..." : "Create Admin"}
+                </button>
+              </form>
 
-    try {
-      const query = new URLSearchParams({
-        patientId,
-        mode: "rag",
-        limit: "100",
-      });
-      const result = await apiRequest<unknown[]>(`/ai/records?${query.toString()}`);
-      const parsedRecords = parseRagRecordList(result);
+              <form className="grid gap-3" onSubmit={handleLogin}>
+                <h2 className="text-xl font-semibold text-[#2f2a21]">Login</h2>
+                <input
+                  className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
+                  placeholder="Email"
+                  type="email"
+                  value={loginForm.email}
+                  onChange={(event) =>
+                    setLoginForm((current) => ({ ...current, email: event.target.value }))
+                  }
+                  required
+                />
+                <input
+                  className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
+                  placeholder="Password"
+                  type="password"
+                  value={loginForm.password}
+                  onChange={(event) =>
+                    setLoginForm((current) => ({ ...current, password: event.target.value }))
+                  }
+                  required
+                />
+                <button
+                  type="submit"
+                  className="rounded-xl bg-[#0f5a4f] px-4 py-2 text-sm font-medium text-white"
+                  disabled={busy}
+                >
+                  {busy ? "Signing in..." : "Login"}
+                </button>
+              </form>
 
-      setRagRecords(parsedRecords);
-      setKeptRagRecordIds(parsedRecords.map((record) => record.id));
+              {feedback && (
+                <p className="rounded-xl border border-[#e3d8c6] bg-[#fffdf8] px-3 py-2 text-sm text-[#6e5b40]">
+                  {feedback}
+                </p>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
+    );
+  }
 
-      if (parsedRecords.length === 0) {
-        showFeedback("info", "No active RAG records found for this patient.");
-        return;
-      }
-
-      showFeedback(
-        "success",
-        `Loaded ${parsedRecords.length} RAG record(s). Uncheck entries you want to delete, then run cleanup.`,
-      );
-    } catch (error) {
-      showFeedback("error", extractErrorMessage(error));
-    } finally {
-      setRagManagerBusy(false);
-    }
-  }, [apiRequest, ragRetentionPatientId, showFeedback]);
-
-  const handleToggleKeptRagRecord = useCallback((recordId: string) => {
-    setKeptRagRecordIds((current) => {
-      if (current.includes(recordId)) {
-        return current.filter((id) => id !== recordId);
-      }
-
-      return [...current, recordId];
-    });
-  }, []);
-
-  const executeRagDeletion = useCallback(
-    async (recordIds: string[], label: string) => {
-      if (recordIds.length === 0) {
-        showFeedback("info", "No RAG records matched this delete action.");
-        return;
-      }
-
-      setRagManagerBusy(true);
-
-      try {
-        const outcomes = await Promise.allSettled(
-          recordIds.map((recordId) =>
-            apiRequest<null>(`/ai/records/${recordId}`, {
-              method: "DELETE",
-            }),
-          ),
-        );
-
-        const deletedIds: string[] = [];
-        const failed: Array<{ id: string; message: string }> = [];
-
-        outcomes.forEach((outcome, index) => {
-          const targetId = recordIds[index];
-          if (!targetId) {
-            return;
-          }
-
-          if (outcome.status === "fulfilled") {
-            deletedIds.push(targetId);
-            return;
-          }
-
-          failed.push({
-            id: targetId,
-            message: extractErrorMessage(outcome.reason),
-          });
-        });
-
-        if (deletedIds.length > 0) {
-          const deletedSet = new Set(deletedIds);
-          setRagRecords((current) => current.filter((record) => !deletedSet.has(record.id)));
-          setKeptRagRecordIds((current) => current.filter((id) => !deletedSet.has(id)));
-        }
-
-        const summaryText = `${label}: deleted ${deletedIds.length}/${recordIds.length} record(s).${
-          failed.length > 0 ? ` Failed: ${failed.length}.` : ""
-        }`;
-
-        pushHistory({
-          kind: "result",
-          title: "RAG cleanup",
-          text: summaryText,
-          payload: {
-            action: label,
-            requested: recordIds,
-            deletedIds,
-            failed,
-          },
-        });
-
-        if (failed.length > 0) {
-          const preview = failed
-            .slice(0, 2)
-            .map((item) => `${item.id}: ${item.message}`)
-            .join(" | ");
-          showFeedback(
-            "error",
-            `Deleted ${deletedIds.length} record(s), ${failed.length} failed. ${preview}`,
-          );
-          return;
-        }
-
-        showFeedback("success", `Deleted ${deletedIds.length} RAG record(s) successfully.`);
-      } finally {
-        setRagManagerBusy(false);
-      }
-    },
-    [apiRequest, pushHistory, showFeedback],
-  );
-
-  const handleDeleteUncheckedRagRecords = useCallback(async () => {
-    const keepSet = new Set(keptRagRecordIds);
-    const targetIds = ragRecords
-      .filter((record) => !keepSet.has(record.id))
-      .map((record) => record.id);
-
-    if (targetIds.length === 0) {
-      showFeedback("info", "All loaded RAG records are currently marked to keep.");
-      return;
-    }
-
-    if (typeof window !== "undefined") {
-      const confirmed = window.confirm(
-        `Delete ${targetIds.length} unchecked RAG record(s) and keep ${keepSet.size} checked record(s)?`,
-      );
-      if (!confirmed) {
-        return;
-      }
-    }
-
-    await executeRagDeletion(targetIds, "delete_unchecked_keep_checked");
-  }, [executeRagDeletion, keptRagRecordIds, ragRecords, showFeedback]);
-
-  const handleDeleteCheckedRagRecords = useCallback(async () => {
-    const keepSet = new Set(keptRagRecordIds);
-    const targetIds = ragRecords
-      .filter((record) => keepSet.has(record.id))
-      .map((record) => record.id);
-
-    if (targetIds.length === 0) {
-      showFeedback("info", "No checked records selected for deletion.");
-      return;
-    }
-
-    if (typeof window !== "undefined") {
-      const confirmed = window.confirm(`Delete ${targetIds.length} checked RAG record(s)?`);
-      if (!confirmed) {
-        return;
-      }
-    }
-
-    await executeRagDeletion(targetIds, "delete_checked_records");
-  }, [executeRagDeletion, keptRagRecordIds, ragRecords, showFeedback]);
-
-  const quickPrompts = useMemo(() => {
-    const prioritizedEntities = [...entityMemory].sort((left, right) => {
-      const leftPinned = pinnedEntityKeySet.has(entityKey(left));
-      const rightPinned = pinnedEntityKeySet.has(entityKey(right));
-
-      if (leftPinned === rightPinned) {
-        return 0;
-      }
-
-      return leftPinned ? -1 : 1;
-    });
-
-    const firstPatient = prioritizedEntities.find((entry) => entry.type === "patient");
-    const firstDoctor = prioritizedEntities.find((entry) => entry.type === "doctor");
-
-    return BASE_QUICK_PROMPTS.map((item) => {
-      let prompt = item.prompt;
-
-      if (firstPatient) {
-        prompt = prompt.replaceAll("<PATIENT_ID>", firstPatient.id);
-      }
-
-      if (firstDoctor) {
-        prompt = prompt.replaceAll("<DOCTOR_ID>", firstDoctor.id);
-      }
-
-      return {
-        ...item,
-        prompt,
-      };
-    });
-  }, [entityMemory, pinnedEntityKeySet]);
-
-  const fetchCount = quickPrompts.filter((item) => item.mode === "fetch").length;
-  const insertCount = quickPrompts.filter((item) => item.mode === "insert").length;
-  const knownPatients = useMemo(
-    () => entityMemory.filter((entry) => entry.type === "patient"),
-    [entityMemory],
-  );
-  const keptRagRecordIdSet = useMemo(() => new Set(keptRagRecordIds), [keptRagRecordIds]);
-  const ragRecordsMarkedForDeletion = useMemo(
-    () => ragRecords.filter((record) => !keptRagRecordIdSet.has(record.id)).length,
-    [keptRagRecordIdSet, ragRecords],
-  );
-  const ragTotalChunkCount = useMemo(
-    () =>
-      ragRecords.reduce(
-        (sum, record) =>
-          sum +
-          record.sourceFiles.reduce((innerSum, file) => innerSum + (file.chunkCount ?? 0), 0),
-        0,
-      ),
-    [ragRecords],
-  );
-  const chatMessages = useMemo(() => [...history].reverse(), [history]);
-  const chatHistoryRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const container = chatHistoryRef.current;
-    if (!container) {
-      return;
-    }
-
-    container.scrollTop = container.scrollHeight;
-  }, [chatMessages.length]);
+  const activePendingAction = activeConversation.pendingAction;
+  const canSendPrompt = chatScope === "global" || (chatScope === "patient" && Boolean(activeFolder));
 
   return (
-    <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-6 sm:px-6 lg:px-10">
-      <header className="shell-card relative overflow-hidden p-6 sm:p-8">
-        <div className="absolute -right-20 -top-20 h-48 w-48 rounded-full bg-[#0b6e6e1a] blur-2xl" />
-        <div className="absolute -bottom-20 -left-16 h-40 w-40 rounded-full bg-[#1a56a81f] blur-2xl" />
-
-        <div className="relative flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <p className="code-text text-xs uppercase tracking-[0.18em] text-[#1a56a8]">MediAssist IA</p>
-            <h1 className="mt-2 text-3xl font-semibold text-[#0b3642] sm:text-4xl">
-              AI-First Clinical Command Center
-            </h1>
-            <p className="mt-3 max-w-3xl text-sm text-slate-600 sm:text-base">
-              Use natural language prompts to insert and fetch operational data. The UI emphasizes
-              AI-driven orchestration and only keeps minimal manual controls for authentication.
+    <div className="h-screen overflow-hidden bg-[#f5f1e8] p-3 text-[#2f2a21]">
+      <div className="mx-auto flex h-full max-w-[1760px] flex-col gap-3 lg:flex-row">
+        <aside className="flex max-h-[46vh] w-full shrink-0 flex-col gap-2 overflow-y-auto rounded-2xl border border-[#ddd2bf] bg-[#f7f2e8] p-2 shadow-[0_6px_18px_rgba(0,0,0,0.05)] lg:max-h-none lg:w-[360px]">
+          <div className="rounded-xl border border-[#d8ccb6] bg-[#fffaf1] px-3 py-2">
+            <p className="text-[11px] uppercase tracking-[0.14em] text-[#8a7c62]">Workspace</p>
+            <p className="mt-1 text-xs text-[#655842]">
+              Active scope: <span className="font-semibold">{chatScope === "global" ? "Global" : "Patient"}</span>
+            </p>
+            <p className="text-[11px] text-[#81745b]">
+              {chatScope === "patient" && activeFolder
+                ? `${activeFolder.name} (${activeFolder.patientId})`
+                : "Shared global context"}
             </p>
           </div>
 
-          <div className="space-y-2 text-right">
-            <p className="code-text text-xs text-slate-500">API Base</p>
-            <p className="code-text rounded-lg border border-[#d6e6e6] bg-white px-3 py-2 text-xs text-[#16444f]">
-              {API_BASE_URL}
-            </p>
-          </div>
-        </div>
-      </header>
-
-      {feedback && (
-        <div
-          className={`shell-card px-4 py-3 text-sm ${
-            feedback.type === "error"
-              ? "border-[#f1c7c7] text-[#9b1c1c]"
-              : feedback.type === "success"
-                ? "border-[#c6eadb] text-[#176742]"
-                : "border-[#c6daf4] text-[#1a56a8]"
-          }`}
-        >
-          {feedback.message}
-        </div>
-      )}
-
-      {!token || !currentUser ? (
-        <section className="grid gap-6 lg:grid-cols-2">
-          <div className="shell-card p-6">
-            <h2 className="text-xl font-semibold text-[#0f3a44]">Initial Admin Setup</h2>
-            <p className="mt-2 text-sm text-slate-600">
-              Run once to create your first admin user with the backend bootstrap key.
-            </p>
-            <form className="mt-5 grid gap-3" onSubmit={handleBootstrapAdmin}>
-              <input
-                className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                placeholder="Bootstrap key"
-                value={bootstrapForm.bootstrapKey}
-                onChange={(event) =>
-                  setBootstrapForm((prev) => ({ ...prev, bootstrapKey: event.target.value }))
-                }
-                minLength={8}
-                required
-              />
-              <input
-                className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                placeholder="Full name"
-                value={bootstrapForm.name}
-                onChange={(event) => setBootstrapForm((prev) => ({ ...prev, name: event.target.value }))}
-                minLength={2}
-                required
-              />
-              <input
-                className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                placeholder="Email"
-                type="email"
-                value={bootstrapForm.email}
-                onChange={(event) => setBootstrapForm((prev) => ({ ...prev, email: event.target.value }))}
-                required
-              />
-              <input
-                className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                placeholder="Password"
-                type="password"
-                value={bootstrapForm.password}
-                onChange={(event) =>
-                  setBootstrapForm((prev) => ({ ...prev, password: event.target.value }))
-                }
-                minLength={8}
-                required
-              />
-              <button
-                type="submit"
-                disabled={busy}
-                className="mt-2 rounded-xl bg-[#0b6e6e] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#0a5f5f] disabled:opacity-60"
-              >
-                Create Admin
-              </button>
-            </form>
-          </div>
-
-          <div className="shell-card p-6">
-            <h2 className="text-xl font-semibold text-[#0f3a44]">Sign In</h2>
-            <p className="mt-2 text-sm text-slate-600">
-              Sign in to run AI commands for patient operations.
-            </p>
-            <form className="mt-5 grid gap-3" onSubmit={handleLogin}>
-              <input
-                className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                placeholder="Email"
-                type="email"
-                value={loginForm.email}
-                onChange={(event) => setLoginForm((prev) => ({ ...prev, email: event.target.value }))}
-                required
-              />
-              <input
-                className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                placeholder="Password"
-                type="password"
-                value={loginForm.password}
-                onChange={(event) => setLoginForm((prev) => ({ ...prev, password: event.target.value }))}
-                minLength={8}
-                required
-              />
-              <button
-                type="submit"
-                disabled={busy}
-                className="mt-2 rounded-xl bg-[#1a56a8] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#164b93] disabled:opacity-60"
-              >
-                Login
-              </button>
-            </form>
-          </div>
-        </section>
-      ) : (
-        <section className="grid min-w-0 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
-          <aside className="space-y-6">
-            <section className="shell-card p-5">
-              <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Session</p>
-              <h3 className="mt-2 text-lg font-semibold text-[#0f3a44]">{currentUser.name}</h3>
-              <p className="text-sm text-slate-600">{currentUser.email}</p>
-              <div className="mt-2">
-                <span className={rolePillClass(currentUser.role)}>{currentUser.role}</span>
-              </div>
-
-              <button
-                onClick={handleLogout}
-                disabled={busy}
-                className="mt-5 w-full rounded-xl border border-[#ecc7c7] bg-[#fff2f2] px-3 py-2 text-sm font-semibold text-[#9b1c1c] transition hover:bg-[#ffe7e7] disabled:opacity-60"
-              >
-                Logout
-              </button>
-            </section>
-
-            <section className="shell-card p-5">
-              <div className="flex items-center justify-between gap-2">
-                <h3 className="text-base font-semibold text-[#0f3a44]">Prompt Shortcuts</h3>
-                <span className="pill bg-[#eef7ff] text-[#1a56a8]">
-                  {fetchCount} fetch / {insertCount} insert
-                </span>
-              </div>
-
-              <div className="mt-4 grid gap-2">
-                {quickPrompts.map((item) => (
-                  <button
-                    key={`${item.title}:${item.mode}`}
-                    onClick={() => {
-                      setPromptMode(item.mode);
-                      setPromptText(item.prompt);
-                    }}
-                    className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-left text-sm text-[#15414d] transition hover:bg-[#f2fafa]"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold">{item.title}</span>
-                      <span className={`pill ${item.mode === "fetch" ? "bg-[#edf7ff] text-[#1a56a8]" : "bg-[#ecfdf3] text-[#176742]"}`}>
-                        {item.mode}
-                      </span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </section>
-
-            <section className="shell-card p-5">
-              <h3 className="text-base font-semibold text-[#0f3a44]">ID Memory</h3>
-              <p className="mt-2 text-sm text-slate-600">
-                AI results auto-fill this memory so you can reuse IDs in follow-up prompts.
-              </p>
-
-              <div className="mt-3 space-y-2">
-                {entityMemory.length === 0 ? (
-                  <p className="text-sm text-slate-500">No entities captured yet.</p>
-                ) : (
-                  entityMemory.map((entry) => (
-                    <article key={`${entry.type}:${entry.id}`} className="rounded-xl border border-[#d8e8e8] bg-white p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="pill bg-[#f5fbfb] text-[#15414d]">{entry.type}</span>
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => handleTogglePinnedEntity(entry)}
-                              className={`code-text rounded-lg border px-2 py-1 text-[11px] ${
-                                pinnedEntityKeySet.has(entityKey(entry))
-                                  ? "border-[#e9d8ad] bg-[#fff9ec] text-[#7a4f07]"
-                                  : "border-[#cfe2e2] text-[#1a56a8]"
-                              }`}
-                            >
-                              {pinnedEntityKeySet.has(entityKey(entry)) ? "unpin" : "pin"}
-                            </button>
-                            <button
-                              onClick={() => void handleCopyId(entry.id)}
-                              className="code-text rounded-lg border border-[#cfe2e2] px-2 py-1 text-[11px] text-[#1a56a8]"
-                            >
-                              copy id
-                            </button>
-                          </div>
-                      </div>
-                      <p className="mt-2 text-sm font-semibold text-[#11333f]">{entry.label}</p>
-                      {entry.hint && <p className="mt-1 text-xs text-slate-600">{entry.hint}</p>}
-                        {pinnedEntityKeySet.has(entityKey(entry)) && (
-                          <p className="mt-1 text-xs font-semibold text-[#7a4f07]">Pinned for context</p>
-                        )}
-                      <p className="code-text mt-2 text-[11px] text-[#1a56a8]">{entry.id}</p>
-                    </article>
-                  ))
-                )}
-              </div>
-            </section>
-
-            <section className="shell-card p-5">
-              <h3 className="text-base font-semibold text-[#0f3a44]">Governance</h3>
-              <p className="mt-2 text-sm text-slate-600">
-                Destructive actions remain pending for confirmation, and only the original requester
-                can approve within 10 minutes.
-              </p>
-            </section>
-          </aside>
-
-          <main className="min-w-0 space-y-6 overflow-x-hidden [&>section]:min-w-0">
-            <section className="shell-card p-5 sm:p-6">
-              <h2 className="text-2xl font-semibold text-[#0f3a44]">AI Chat Workspace</h2>
-              <p className="mt-2 text-sm text-slate-600">
-                Chat continuously with the AI. Prompt and response history stays visible while you
-                type so you can follow context without leaving this panel.
-              </p>
-
-              <form className="mt-5 grid gap-3" onSubmit={handleExecuteAgent}>
-                <div className="flex flex-wrap gap-2">
+          {DropdownSection({
+            title: "Chat Scope",
+            subtitle: "Switch context and manage patient chat folders",
+            icon: ScopeIcon(),
+            defaultOpen: true,
+            children: (
+              <>
+                <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    onClick={() => setPromptMode("fetch")}
-                    className={`rounded-xl px-3 py-2 text-sm font-semibold ${
-                      promptMode === "fetch"
-                        ? "bg-[#1a56a8] text-white"
-                        : "bg-[#edf7ff] text-[#1a56a8]"
+                    onClick={() => setChatScope("global")}
+                    className={`rounded-lg px-2 py-2 text-xs font-semibold ${
+                      chatScope === "global"
+                        ? "bg-[#2f2a21] text-[#f8f4ec]"
+                        : "border border-[#d2c6b1] bg-[#f7f0e4] text-[#665a44]"
                     }`}
                   >
-                    Fetch mode
+                    Global Chat
                   </button>
                   <button
                     type="button"
-                    onClick={() => setPromptMode("insert")}
-                    className={`rounded-xl px-3 py-2 text-sm font-semibold ${
-                      promptMode === "insert"
-                        ? "bg-[#176742] text-white"
-                        : "bg-[#ecfdf3] text-[#176742]"
+                    onClick={() => setChatScope("patient")}
+                    className={`rounded-lg px-2 py-2 text-xs font-semibold ${
+                      chatScope === "patient"
+                        ? "bg-[#2f2a21] text-[#f8f4ec]"
+                        : "border border-[#d2c6b1] bg-[#f7f0e4] text-[#665a44]"
                     }`}
                   >
-                    Insert mode
+                    Patient Chat
                   </button>
                 </div>
+                <button
+                  type="button"
+                  onClick={handleNewChat}
+                  className="mt-2 w-full rounded-lg border border-[#cfc2ab] bg-[#fbf7ef] px-3 py-2 text-left text-xs font-medium hover:bg-[#fffaf3]"
+                >
+                  + New Chat In Current Scope
+                </button>
 
-                <div className="min-w-0 overflow-x-hidden rounded-xl border border-[#d6e6e6] bg-[#f8fcfc] p-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setContextEnabled((value) => !value)}
-                      className={`rounded-lg px-3 py-2 text-xs font-semibold ${
-                        contextEnabled
-                          ? "bg-[#0b6e6e] text-white"
-                          : "bg-[#eef7ff] text-[#1a56a8]"
-                      }`}
-                    >
-                      Conversation memory: {contextEnabled ? "ON" : "OFF"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowContextPreview((value) => !value)}
-                      className="rounded-lg border border-[#cfe2e2] bg-white px-3 py-2 text-xs font-semibold text-[#15414d]"
-                    >
-                      {showContextPreview ? "Hide context preview" : "Show context preview"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={clearConversationMemory}
-                      className="rounded-lg border border-[#ecc7c7] bg-[#fff2f2] px-3 py-2 text-xs font-semibold text-[#9b1c1c]"
-                    >
-                      Clear conversation
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void loadPersistentHistory()}
-                      disabled={busy}
-                      className="rounded-lg border border-[#cfe2e2] bg-white px-3 py-2 text-xs font-semibold text-[#15414d] disabled:opacity-60"
-                    >
-                      Load persisted history
-                    </button>
-                  </div>
-
-                  <p className="mt-2 text-xs text-slate-600">
-                    Context pack active items: {contextPack.includedCount}/{contextPack.totalCount}
-                    {" "}(history: {contextPack.historyLines.length}, entities: {contextPack.entityLines.length}
-                    {contextPack.pendingLine ? ", pending action: 1" : ", pending action: 0"}).
-                  </p>
-
-                  <div className="mt-3 flex min-w-0 flex-wrap items-center gap-2">
-                    <span className="text-xs font-semibold text-slate-600">Presets</span>
-                    {([
-                      "full",
-                      "history-only",
-                      "entities-only",
-                      "pending-only",
-                    ] as Exclude<ContextPreset, "custom">[]).map((preset) => (
+                {chatScope === "patient" && (
+                  <>
+                    <div className="mt-3 rounded-lg border border-[#dacfbf] bg-[#fffdf7] p-2">
                       <button
-                        key={preset}
                         type="button"
-                        onClick={() => handleApplyContextPreset(preset)}
-                        className={`rounded-lg border px-2 py-1 text-[11px] font-semibold ${
-                          contextPreset === preset
-                            ? "border-transparent bg-[#0b6e6e] text-white"
-                            : "border-[#cfe2e2] bg-white text-[#15414d]"
-                        }`}
+                        onClick={() => setShowFolderForm((current) => !current)}
+                        className="w-full rounded-md border border-[#d2c6b1] px-2 py-2 text-[11px] font-medium text-[#6a5b43] hover:bg-[#fff8ed]"
                       >
-                        {contextPresetLabel(preset)}
+                        {showFolderForm ? "Hide Create Form" : "Create Patient Folder"}
                       </button>
-                    ))}
 
-                    <span className="pill max-w-full break-words bg-[#f8fafb] text-slate-600">
-                      Current: {contextPresetLabel(contextPreset)}
-                    </span>
-                  </div>
-
-                  {contextPack.items.length > 0 ? (
-                    <div className="mt-3 space-y-3">
-                      <p className="text-xs text-slate-600">
-                        Context chips: click to include or exclude individual memory items before
-                        sending your prompt.
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={handleIncludeAllContextItems}
-                          className="rounded-lg border border-[#cfe2e2] bg-white px-3 py-2 text-xs font-semibold text-[#15414d]"
-                        >
-                          Include all
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleExcludeAllContextItems}
-                          disabled={contextPack.items.length === 0}
-                          className="rounded-lg border border-[#e7d8b4] bg-[#fff9ec] px-3 py-2 text-xs font-semibold text-[#7a4f07] disabled:opacity-50"
-                        >
-                          Exclude all
-                        </button>
-                      </div>
-
-                      <div className="min-w-0 space-y-2">
-                        {(["history", "entity", "pending"] as ContextItemKind[]).map((kind) => {
-                          const items = groupedContextItems[kind];
-                          if (items.length === 0) {
-                            return null;
-                          }
-
-                          const includedCount = items.filter(
-                            (item) => !excludedContextKeySet.has(item.key),
-                          ).length;
-
-                          return (
-                            <article
-                              key={kind}
-                              className="min-w-0 rounded-xl border border-[#d6e6e6] bg-white p-3"
-                            >
-                              <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                                  <span className={`pill ${contextItemKindClass(kind)}`}>
-                                    {contextItemKindLabel(kind)}
-                                  </span>
-                                  <span className="text-[11px] text-slate-600">
-                                    {includedCount}/{items.length} included
-                                  </span>
-                                </div>
-
-                                <div className="flex flex-wrap gap-2 sm:justify-end">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleIncludeContextGroup(kind)}
-                                    className="rounded-lg border border-[#cfe2e2] bg-white px-2 py-1 text-[11px] font-semibold text-[#15414d]"
-                                  >
-                                    Include group
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleExcludeContextGroup(kind)}
-                                    className="rounded-lg border border-[#e7d8b4] bg-[#fff9ec] px-2 py-1 text-[11px] font-semibold text-[#7a4f07]"
-                                  >
-                                    Exclude group
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleToggleContextGroup(kind)}
-                                    className="rounded-lg border border-[#d3dce2] bg-[#f8fafb] px-2 py-1 text-[11px] font-semibold text-slate-700"
-                                  >
-                                    {collapsedContextGroups[kind] ? "Expand" : "Collapse"}
-                                  </button>
-                                </div>
-                              </div>
-
-                              {!collapsedContextGroups[kind] && (
-                                <div className="mt-3 flex min-w-0 flex-wrap gap-2">
-                                  {items.map((item) => {
-                                    const isExcluded = excludedContextKeySet.has(item.key);
-
-                                    return (
-                                      <button
-                                        key={item.key}
-                                        type="button"
-                                        aria-pressed={!isExcluded}
-                                        onClick={() => handleToggleContextItem(item.key)}
-                                        className={`max-w-full break-words rounded-full border px-3 py-1 text-left text-[11px] font-semibold transition ${
-                                          isExcluded
-                                            ? "border-[#d3dce2] bg-white text-slate-500 line-through"
-                                            : `border-transparent ${contextItemKindClass(item.kind)}`
-                                        }`}
-                                        title={item.line}
-                                      >
-                                        {item.label} {isExcluded ? "(off)" : "(on)"}
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              )}
-                            </article>
-                          );
-                        })}
-                      </div>
+                      {showFolderForm && (
+                        <form className="mt-2 grid gap-2" onSubmit={handleCreateFolder}>
+                          <input
+                            className="rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
+                            placeholder="Folder name"
+                            value={newFolderForm.name}
+                            onChange={(event) =>
+                              setNewFolderForm((current) => ({ ...current, name: event.target.value }))
+                            }
+                            required
+                          />
+                          <input
+                            className="rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
+                            placeholder="Patient ID (ObjectId)"
+                            value={newFolderForm.patientId}
+                            onChange={(event) =>
+                              setNewFolderForm((current) => ({ ...current, patientId: event.target.value }))
+                            }
+                            required
+                          />
+                          <button
+                            type="submit"
+                            className="rounded-lg bg-[#2f2a21] px-3 py-2 text-xs font-semibold text-[#f8f4ec]"
+                          >
+                            Create Folder
+                          </button>
+                        </form>
+                      )}
                     </div>
-                  ) : (
-                    <p className="mt-3 text-xs text-slate-500">
-                      No context items available yet. Run at least one prompt first.
-                    </p>
-                  )}
 
-                  {showContextPreview && (
-                    <pre className="code-text mt-3 max-h-44 max-w-full overflow-auto rounded-xl bg-white p-3 text-[11px] text-[#173b46]">
-                      {contextPack.text || "No context available yet."}
-                    </pre>
-                  )}
-                </div>
+                    <div className="mt-2 max-h-[190px] space-y-2 overflow-y-auto pr-1">
+                      {folders.length === 0 && (
+                        <p className="rounded-lg border border-dashed border-[#d8ccb6] px-2 py-2 text-xs text-[#8a7c62]">
+                          No patient folders yet.
+                        </p>
+                      )}
 
-                <div className="rounded-xl border border-[#d6e6e6] bg-white p-3">
-                  <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <h3 className="text-sm font-semibold text-[#11333f]">Conversation</h3>
-                    <span className="pill bg-[#f5fbfb] text-[#15414d]">
-                      {chatMessages.length} messages
-                    </span>
-                  </div>
-
-                  {chatMessages.length === 0 ? (
-                    <p className="mt-3 text-sm text-slate-600">
-                      Start with your first prompt. Messages will appear here in chat format.
-                    </p>
-                  ) : (
-                    <div ref={chatHistoryRef} className="mt-3 max-h-96 space-y-3 overflow-y-auto pr-1">
-                      {chatMessages.map((item) => {
-                        const isPrompt = item.kind === "prompt";
-                        const bubbleClass = isPrompt
-                          ? "ml-auto border-[#bcd7f2] bg-[#edf7ff]"
-                          : item.kind === "system"
-                            ? "mr-auto border-[#f0d9c7] bg-[#fff4e8]"
-                            : "mr-auto border-[#cce8d9] bg-[#ecfdf3]";
+                      {folders.map((folder) => {
+                        const stats = folderStats.find((entry) => entry.folderId === folder.id);
+                        const isActive = folder.id === activeFolderId;
 
                         return (
-                          <article
-                            key={item.id}
-                            className={`max-w-[94%] min-w-0 rounded-xl border p-3 ${bubbleClass}`}
+                          <div
+                            key={folder.id}
+                            className={`rounded-lg border px-2 py-2 ${
+                              isActive
+                                ? "border-[#baab8f] bg-[#fff8ed]"
+                                : "border-[#d9ceb9] bg-[#faf6ee]"
+                            }`}
                           >
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <span className={historyBadgeClass(item.kind)}>{item.kind}</span>
-                              <span className="code-text text-[11px] text-slate-500">
-                                {formatDateTime(new Date(item.createdAt).toISOString())}
-                              </span>
-                            </div>
-
-                            <h4 className="mt-2 text-sm font-semibold text-[#11333f]">{item.title}</h4>
-                            <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">
-                              {item.text}
-                            </p>
-
-                            {item.payload !== undefined && (
-                              <details className="mt-2 min-w-0">
-                                <summary className="cursor-pointer text-xs text-[#1a56a8]">
-                                  View raw payload
-                                </summary>
-                                <pre className="code-text mt-2 max-h-56 w-full max-w-full overflow-x-auto overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-white/70 p-2 text-[11px] text-[#173b46]">
-                                  {safeJson(item.payload)}
-                                </pre>
-                              </details>
-                            )}
-                          </article>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveFolderId(folder.id);
+                                setChatScope("patient");
+                              }}
+                              className="w-full text-left"
+                            >
+                              <p className="text-xs font-semibold text-[#3c3327]">{folder.name}</p>
+                              <p className="mt-1 break-all text-[10px] text-[#7c6e55]">{folder.patientId}</p>
+                              <p className="mt-1 text-[10px] text-[#8e7f63]">
+                                {stats?.messageCount ?? 0} messages
+                                {stats?.lastMessageAt ? ` | ${formatDateTime(stats.lastMessageAt)}` : ""}
+                              </p>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteFolder(folder.id)}
+                              className="mt-1 rounded-md border border-[#d6c8b1] px-2 py-1 text-[10px] font-medium text-[#7f3f3f] hover:bg-[#fff1ef]"
+                            >
+                              Delete
+                            </button>
+                          </div>
                         );
                       })}
                     </div>
-                  )}
-                </div>
+                  </>
+                )}
+              </>
+            ),
+          })}
 
-                <textarea
-                  className="min-h-28 rounded-xl border border-[#cfe2e2] bg-white px-3 py-3 text-sm"
-                  placeholder="Continue the conversation. Example: list all active doctors and then create an appointment for the first one."
-                  value={promptText}
-                  onChange={(event) => setPromptText(event.target.value)}
-                  required
-                />
+          {DropdownSection({
+            title: "RAG Upload",
+            subtitle: "Switch between global and patient uploads",
+            icon: UploadIcon(),
+            children: (
+              <form
+                className="grid gap-2"
+                onSubmit={(event) => {
+                  if (ragUploadMode === "global") {
+                    void handleUploadGlobalRag(event);
+                    return;
+                  }
 
-                <div className="flex flex-wrap items-center gap-3">
-                  <label className="text-sm text-slate-700">
-                    Max tool calls
-                    <input
-                      className="ml-3 w-24 rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                      type="number"
-                      min={1}
-                      max={8}
-                      value={maxToolCalls}
-                      onChange={(event) => setMaxToolCalls(Number(event.target.value) || 1)}
-                    />
-                  </label>
-
-                  <button
-                    type="submit"
-                    disabled={busy}
-                    className="rounded-xl bg-[#0b6e6e] px-5 py-2 text-sm font-semibold text-white transition hover:bg-[#0a5f5f] disabled:opacity-60"
-                  >
-                    {busy ? "Processing..." : "Run AI Command"}
-                  </button>
-                </div>
-              </form>
-            </section>
-
-            <section className="shell-card p-5 sm:p-6">
-              <h3 className="text-xl font-semibold text-[#0f3a44]">Document Upload (RAG and non-RAG)</h3>
-              <p className="mt-2 text-sm text-slate-600">
-                Upload pdf, doc/docx, xls/xlsx, csv, or txt files to create AI records from
-                document content. Choose rag mode to index uploaded chunks for retrieval.
-              </p>
-
-              <form className="mt-4 grid gap-3" onSubmit={handleUploadFiles}>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <input
-                    className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                    placeholder="Patient ID (Mongo ObjectId)"
-                    value={uploadForm.patientId}
-                    onChange={(event) =>
-                      setUploadForm((current) => ({
-                        ...current,
-                        patientId: event.target.value,
-                      }))
-                    }
-                    list="known-patient-ids"
-                    required
-                  />
-
-                  <select
-                    className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                    value={uploadForm.mode}
-                    onChange={(event) =>
-                      setUploadForm((current) => ({
-                        ...current,
-                        mode: event.target.value as AIRecordMode,
-                      }))
-                    }
-                  >
-                    <option value="rag">rag</option>
-                    <option value="non_rag">non_rag</option>
-                  </select>
-                </div>
-
-                <datalist id="known-patient-ids">
-                  {knownPatients.map((patient) => (
-                    <option key={patient.id} value={patient.id}>
-                      {patient.label}
-                    </option>
-                  ))}
-                </datalist>
-
-                {knownPatients.length > 0 && (
+                  void handleUploadPatientRag(event);
+                }}
+              >
+                <div className="inline-flex rounded-lg border border-[#d2c6b1] bg-[#f6f0e4] p-1 text-xs">
                   <button
                     type="button"
-                    onClick={() => {
-                      const firstPatient = knownPatients[0];
-                      if (!firstPatient) {
-                        return;
-                      }
-
-                      setUploadForm((current) => ({
-                        ...current,
-                        patientId: firstPatient.id,
-                      }));
-                    }}
-                    className="w-fit rounded-lg border border-[#cfe2e2] bg-[#f6fbfb] px-3 py-2 text-xs font-semibold text-[#15414d]"
+                    onClick={() => setRagUploadMode("global")}
+                    className={`rounded-md px-2 py-1 ${
+                      ragUploadMode === "global" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
+                    }`}
                   >
-                    Use first remembered patient ID
+                    Global
                   </button>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => setRagUploadMode("patient")}
+                    className={`rounded-md px-2 py-1 ${
+                      ragUploadMode === "patient" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
+                    }`}
+                  >
+                    Patient
+                  </button>
+                </div>
 
-                <input
-                  className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                  placeholder="Record title (optional)"
-                  value={uploadForm.title}
-                  maxLength={120}
-                  onChange={(event) =>
-                    setUploadForm((current) => ({
-                      ...current,
-                      title: event.target.value,
-                    }))
-                  }
-                />
+                {ragUploadMode === "patient" && (
+                  <div className="rounded-lg border border-[#d7ccb8] bg-[#fffdf8] px-2 py-2 text-[11px] text-[#615338]">
+                    Active patient: {activeFolder ? `${activeFolder.name} (${activeFolder.patientId})` : "None"}
+                  </div>
+                )}
 
                 <textarea
-                  className="min-h-24 rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                  placeholder="Optional analysis prompt. Leave empty to use the default summarization prompt."
-                  value={uploadForm.prompt}
-                  onChange={(event) =>
-                    setUploadForm((current) => ({
-                      ...current,
-                      prompt: event.target.value,
-                    }))
+                  className="min-h-[56px] rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
+                  placeholder={
+                    ragUploadMode === "global" ? "Optional note" : "Optional prompt for parsing context"
                   }
+                  value={ragUploadMode === "global" ? globalRagNote : patientRagPrompt}
+                  onChange={(event) => {
+                    if (ragUploadMode === "global") {
+                      setGlobalRagNote(event.target.value);
+                      return;
+                    }
+
+                    setPatientRagPrompt(event.target.value);
+                  }}
+                  disabled={ragUploadMode === "patient" && !activeFolder}
                 />
 
                 <input
-                  key={fileInputKey}
-                  className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
                   type="file"
-                  accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.csv"
                   multiple
                   onChange={(event) => {
-                    const files = Array.from(event.target.files ?? []);
-                    setSelectedFiles(files);
-                  }}
-                />
+                    if (ragUploadMode === "global") {
+                      setGlobalRagFiles(Array.from(event.target.files ?? []));
+                      return;
+                    }
 
-                {selectedFiles.length > 0 && (
-                  <p className="text-xs text-slate-600">
-                    Selected: {selectedFiles.map((file) => file.name).join(", ")}
-                  </p>
-                )}
+                    setPatientRagFiles(Array.from(event.target.files ?? []));
+                  }}
+                  className="rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
+                  disabled={ragUploadMode === "patient" && !activeFolder}
+                />
 
                 <button
                   type="submit"
-                  disabled={busy}
-                  className="rounded-xl bg-[#1a56a8] px-5 py-2 text-sm font-semibold text-white transition hover:bg-[#164b93] disabled:opacity-60"
+                  className={`rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60 ${
+                    ragUploadMode === "global" ? "bg-[#0f5a4f]" : "bg-[#1c4f8c]"
+                  }`}
+                  disabled={
+                    busy ||
+                    (ragUploadMode === "global" ? currentUser.role !== "admin" : !activeFolder)
+                  }
                 >
-                  {busy ? "Uploading..." : "Upload Files and Generate Record"}
+                  {busy
+                    ? "Uploading..."
+                    : ragUploadMode === "global"
+                      ? "Upload Global RAG"
+                      : "Upload Patient RAG"}
                 </button>
+
+                {ragUploadMode === "global" && currentUser.role !== "admin" && (
+                  <p className="text-[11px] text-[#8d6b35]">Only admin can upload global knowledge.</p>
+                )}
               </form>
-            </section>
+            ),
+          })}
 
-            <section className="shell-card p-5 sm:p-6">
-              <h3 className="text-xl font-semibold text-[#0f3a44]">RAG Retention Manager</h3>
-              <p className="mt-2 text-sm text-slate-600">
-                Load a patient RAG record set, mark what you want to keep, and delete the rest.
-                Deleting a record also removes its indexed vectors from RAG storage.
-              </p>
+          {DropdownSection({
+            title: "Account",
+            subtitle: "Profile and session",
+            icon: UserIcon(),
+            defaultOpen: true,
+            children: (
+              <>
+                <p className="text-sm font-semibold text-[#352d21]">{currentUser.name}</p>
+                <p className="mt-1 text-xs text-[#7e7058]">{currentUser.email}</p>
+                <span
+                  className={`mt-2 inline-block rounded-full px-2 py-1 text-[11px] font-semibold ${roleBadgeClass(
+                    currentUser.role,
+                  )}`}
+                >
+                  {currentUser.role}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void handleLogout()}
+                  className="mt-3 w-full rounded-lg border border-[#cdbfa8] px-3 py-2 text-xs font-medium hover:bg-[#f7efe1]"
+                  disabled={busy}
+                >
+                  Logout
+                </button>
+              </>
+            ),
+          })}
+        </aside>
 
-              <div className="mt-4 grid gap-3">
-                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-                  <input
-                    className="rounded-xl border border-[#cfe2e2] bg-white px-3 py-2 text-sm"
-                    placeholder="Patient ID (Mongo ObjectId)"
-                    value={ragRetentionPatientId}
-                    onChange={(event) => setRagRetentionPatientId(event.target.value)}
-                    list="known-patient-ids"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void handleLoadRagRecords()}
-                    disabled={busy || ragManagerBusy}
-                    className="rounded-xl bg-[#1a56a8] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#164b93] disabled:opacity-60"
-                  >
-                    {ragManagerBusy ? "Loading..." : "Load RAG Records"}
-                  </button>
-                </div>
-
-                {knownPatients.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const firstPatient = knownPatients[0];
-                      if (!firstPatient) {
-                        return;
-                      }
-
-                      setRagRetentionPatientId(firstPatient.id);
-                    }}
-                    className="w-fit rounded-lg border border-[#cfe2e2] bg-[#f6fbfb] px-3 py-2 text-xs font-semibold text-[#15414d]"
-                  >
-                    Use first remembered patient ID
-                  </button>
-                )}
-
-                {ragRecords.length === 0 ? (
-                  <p className="text-sm text-slate-500">
-                    No loaded RAG records yet. Provide a patient ID and load records first.
-                  </p>
-                ) : (
-                  <div className="rounded-xl border border-[#d6e6e6] bg-white p-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="pill bg-[#eef7ff] text-[#1a56a8]">
-                        {ragRecords.length} loaded
-                      </span>
-                      <span className="pill bg-[#ecfdf3] text-[#176742]">
-                        {keptRagRecordIds.length} marked keep
-                      </span>
-                      <span className="pill bg-[#fff4e8] text-[#9a4f00]">
-                        {ragRecordsMarkedForDeletion} marked delete
-                      </span>
-                      <span className="pill bg-[#f8fafb] text-slate-600">
-                        {ragTotalChunkCount} indexed chunks
-                      </span>
-                    </div>
-
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setKeptRagRecordIds(ragRecords.map((record) => record.id))}
-                        className="rounded-lg border border-[#cfe2e2] bg-white px-3 py-2 text-xs font-semibold text-[#15414d]"
-                      >
-                        Keep all
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setKeptRagRecordIds([])}
-                        className="rounded-lg border border-[#e7d8b4] bg-[#fff9ec] px-3 py-2 text-xs font-semibold text-[#7a4f07]"
-                      >
-                        Mark all for delete
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleDeleteUncheckedRagRecords()}
-                        disabled={busy || ragManagerBusy || ragRecordsMarkedForDeletion === 0}
-                        className="rounded-lg bg-[#9b1c1c] px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-                      >
-                        Delete unchecked (keep checked)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleDeleteCheckedRagRecords()}
-                        disabled={busy || ragManagerBusy || keptRagRecordIds.length === 0}
-                        className="rounded-lg border border-[#ecc7c7] bg-[#fff2f2] px-3 py-2 text-xs font-semibold text-[#9b1c1c] disabled:opacity-60"
-                      >
-                        Delete checked
-                      </button>
-                    </div>
-
-                    <div className="mt-3 max-h-[380px] space-y-2 overflow-y-auto pr-1">
-                      {ragRecords.map((record) => (
-                        <article
-                          key={record.id}
-                          className="rounded-xl border border-[#d8e8e8] bg-[#fbfefe] p-3"
-                        >
-                          <div className="flex flex-wrap items-start justify-between gap-2">
-                            <label className="inline-flex items-center gap-2 text-sm font-semibold text-[#15414d]">
-                              <input
-                                type="checkbox"
-                                className="h-4 w-4 rounded border-[#accaca]"
-                                checked={keptRagRecordIdSet.has(record.id)}
-                                onChange={() => handleToggleKeptRagRecord(record.id)}
-                              />
-                              Keep this record
-                            </label>
-
-                            <button
-                              type="button"
-                              onClick={() => void handleCopyId(record.id)}
-                              className="code-text rounded-lg border border-[#cfe2e2] px-2 py-1 text-[11px] text-[#1a56a8]"
-                            >
-                              copy id
-                            </button>
-                          </div>
-
-                          <p className="mt-2 text-sm font-semibold text-[#11333f]">
-                            {record.title ?? "Untitled RAG record"}
-                          </p>
-                          <p className="code-text mt-1 text-[11px] text-[#1a56a8]">{record.id}</p>
-
-                          <p className="mt-1 text-xs text-slate-600">
-                            Created: {record.createdAt ? formatDateTime(record.createdAt) : "unknown"}
-                            {record.provider ? ` | Provider: ${record.provider}` : ""}
-                          </p>
-
-                          {record.sourceFiles.length > 0 ? (
-                            <p className="mt-1 text-xs text-slate-600">
-                              Files: {record.sourceFiles
-                                .map((file) =>
-                                  `${file.fileName}${
-                                    file.chunkCount !== null ? ` (${file.chunkCount} chunks)` : ""
-                                  }`,
-                                )
-                                .join(" | ")}
-                            </p>
-                          ) : (
-                            <p className="mt-1 text-xs text-slate-500">
-                              No uploaded file chunk metadata on this record.
-                            </p>
-                          )}
-
-                          {record.prompt && (
-                            <details className="mt-2">
-                              <summary className="cursor-pointer text-xs text-[#1a56a8]">
-                                Prompt preview
-                              </summary>
-                              <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-700">
-                                {truncateText(record.prompt, 320)}
-                              </p>
-                            </details>
-                          )}
-                        </article>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </section>
-
-            {pendingAction && (
-              <section className="shell-card border-[#e3d8bc] bg-[#fff9ec] p-5 sm:p-6">
-                <h3 className="text-lg font-semibold text-[#7a4f07]">Pending Destructive Action</h3>
-                <p className="mt-2 text-sm text-[#7a4f07]">
-                  Approval is required before execution. This pending action can only be confirmed by
-                  your current account.
+        <section className="flex min-w-0 flex-1 flex-col rounded-2xl border border-[#ddd2bf] bg-[#faf7f0] shadow-[0_6px_18px_rgba(0,0,0,0.05)]">
+          <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[#e2d8c7] px-4 py-3">
+            <div>
+              <p className="text-xs uppercase tracking-[0.14em] text-[#8e7f63]">MediAssist Conversation</p>
+              <h1 className="text-lg font-semibold text-[#2f2a21]">
+                {chatScope === "global" ? "Global AI Chat" : "Patient Folder AI Chat"}
+              </h1>
+              {chatScope === "global" ? (
+                <p className="mt-1 text-xs text-[#6f6148]">Using Global Knowledge RAG by default.</p>
+              ) : activeFolder ? (
+                <p className="mt-1 text-xs text-[#6f6148]">
+                  Folder: <span className="font-semibold">{activeFolder.name}</span> | Patient ID: {" "}
+                  <span className="font-semibold">{activeFolder.patientId}</span>
                 </p>
-                <p className="code-text mt-2 text-xs text-[#7a4f07]">Action ID: {pendingAction.id}</p>
-                {pendingAction.expiresAt && (
-                  <p className="text-xs text-[#7a4f07]">Expires at: {formatDateTime(pendingAction.expiresAt)}</p>
-                )}
+              ) : (
+                <p className="mt-1 text-xs text-[#8c6a38]">
+                  Select a patient folder to use patient-scoped context.
+                </p>
+              )}
+            </div>
+          </header>
 
-                {pendingAction.plannedToolCalls.length > 0 && (
-                  <div className="mt-4 space-y-2">
-                    <p className="text-sm font-semibold text-[#7a4f07]">Planned tool calls</p>
-                    {pendingAction.plannedToolCalls.map((call, index) => (
-                      <article key={`${call.tool}:${index}`} className="rounded-xl border border-[#eadcb9] bg-white/80 p-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="code-text text-xs text-[#7a4f07]">{call.tool}</span>
-                          {call.reason && <span className="text-xs text-slate-600">{call.reason}</span>}
-                        </div>
-                        <details className="mt-2 min-w-0">
-                          <summary className="cursor-pointer text-xs text-[#7a4f07]">View args</summary>
-                          <pre className="code-text mt-2 max-h-56 w-full max-w-full overflow-x-auto overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-[#fdf6e8] p-2 text-[11px] text-[#724a06]">
-                            {safeJson(call.args)}
-                          </pre>
-                        </details>
-                      </article>
-                    ))}
-                  </div>
-                )}
+          {feedback && (
+            <div className="border-b border-[#eadfce] bg-[#fff9ee] px-4 py-2 text-sm text-[#745f3e]">{feedback}</div>
+          )}
 
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <button
-                    onClick={() => void handleConfirmPendingAction(true)}
-                    disabled={busy}
-                    className="rounded-xl bg-[#176742] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                  >
-                    Approve and Execute
-                  </button>
-                  <button
-                    onClick={() => void handleConfirmPendingAction(false)}
-                    disabled={busy}
-                    className="rounded-xl bg-[#9b1c1c] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                  >
-                    Reject
-                  </button>
-                </div>
-              </section>
+          <div ref={chatContainerRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6">
+            {activeConversation.messages.length === 0 && (
+              <div className="mx-auto mt-8 max-w-3xl rounded-2xl border border-[#dfd3bf] bg-white/80 p-6 text-center">
+                <h2 className="text-2xl font-semibold text-[#2f2a21]">
+                  {chatScope === "global"
+                    ? "Ask using global context"
+                    : activeFolder
+                      ? `Ask about ${activeFolder.name}`
+                      : "Select a patient folder first"}
+                </h2>
+                <p className="mt-2 text-sm text-[#6f6148]">
+                  {chatScope === "global"
+                    ? "This chat uses Global RAG knowledge by default."
+                    : activeFolder
+                      ? "This chat uses patient RAG first, then falls back to global RAG when needed."
+                      : "Create or choose a patient folder in the left panel to continue."}
+                </p>
+              </div>
             )}
 
-            <section className="shell-card p-5 sm:p-6">
-              <h3 className="text-lg font-semibold text-[#0f3a44]">Latest Agent Response</h3>
-              <p className="mt-2 text-sm text-slate-600">
-                Use this panel for quick debugging of tool plans and execution output.
-              </p>
+            {activeConversation.messages.map((message) => (
+              <article key={message.id} className="space-y-2">
+                <div className={messageBubbleClass(message.role)}>
+                  <p className="whitespace-pre-wrap break-words text-sm leading-6">{message.text}</p>
+                </div>
+                <div className="px-1 text-[11px] text-[#8f8167]">
+                  {new Date(message.createdAt).toLocaleTimeString()}
+                </div>
+                {message.raw !== undefined && (
+                  <details className="rounded-xl border border-[#e4dac9] bg-[#fffdf9] p-2 text-xs text-[#5f523d]">
+                    <summary className="cursor-pointer select-none">Technical details (JSON)</summary>
+                    <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words">
+                      {JSON.stringify(message.raw, null, 2)}
+                    </pre>
+                  </details>
+                )}
+              </article>
+            ))}
+          </div>
 
-              <pre className="code-text mt-3 max-h-[420px] w-full max-w-full overflow-x-auto overflow-y-auto whitespace-pre-wrap break-words rounded-xl bg-[#f5fbfb] p-3 text-xs text-[#173b46]">
-                {safeJson(lastResult)}
-              </pre>
-            </section>
-          </main>
+          {activePendingAction && (
+            <div className="border-t border-[#e3d8c8] bg-[#fff6e6] px-4 py-3">
+              <p className="text-sm font-medium text-[#6f4a00]">Pending destructive action</p>
+              <p className="mt-1 text-xs text-[#7d6440]">
+                ID: {activePendingAction.id}
+                {activePendingAction.expiresAt
+                  ? ` | Expires: ${formatDateTime(activePendingAction.expiresAt)}`
+                  : ""}
+              </p>
+              {activePendingAction.plannedToolCalls.length > 0 && (
+                <p className="mt-1 text-xs text-[#7d6440]">
+                  Planned tools: {activePendingAction.plannedToolCalls.map((call) => call.tool).join(", ")}
+                </p>
+              )}
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleConfirmPendingAction(true)}
+                  className="rounded-lg bg-[#166534] px-3 py-2 text-xs font-semibold text-white"
+                  disabled={busy}
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleConfirmPendingAction(false)}
+                  className="rounded-lg bg-[#8a1c1c] px-3 py-2 text-xs font-semibold text-white"
+                  disabled={busy}
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          )}
+
+          <footer className="border-t border-[#e2d8c7] p-2 sm:p-2.5">
+            <form className="space-y-2" onSubmit={handleSendPrompt}>
+              <div className="relative rounded-2xl border border-[#d6cab5] bg-white p-2.5 shadow-[0_4px_10px_rgba(0,0,0,0.04)]">
+                <textarea
+                  value={promptInput}
+                  onChange={(event) => setPromptInput(event.target.value)}
+                  placeholder={
+                    chatScope === "global"
+                      ? "Message MediAssist globally..."
+                      : activeFolder
+                        ? `Message MediAssist for ${activeFolder.name}...`
+                        : "Select a patient folder first..."
+                  }
+                  className="min-h-[52px] w-full resize-y border-0 bg-transparent text-sm leading-6 text-[#2f2a21] outline-none"
+                  disabled={!canSendPrompt}
+                />
+
+                <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 border-t border-[#eee6d8] pt-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <details className="group relative">
+                      <summary className="flex h-8 w-8 cursor-pointer list-none items-center justify-center rounded-lg border border-[#d9ceb9] bg-[#faf6ee] text-[#6c5e47] hover:bg-white [&::-webkit-details-marker]:hidden">
+                        {ControlsIcon()}
+                        <span className="sr-only">Open main controls</span>
+                      </summary>
+                      <div className="absolute bottom-full left-0 z-20 mb-1.5 w-[270px] rounded-xl border border-[#d8ccb6] bg-[#fffaf1] p-2.5 shadow-[0_8px_20px_rgba(0,0,0,0.08)]">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#7e7058]">
+                          Main Controls
+                        </p>
+                        <div className="mt-2 inline-flex rounded-lg border border-[#d2c6b1] bg-[#f6f0e4] p-0.5 text-[11px]">
+                          <button
+                            type="button"
+                            onClick={() => setPromptMode("fetch")}
+                            className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${
+                              promptMode === "fetch" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
+                            }`}
+                          >
+                            {FetchIcon()}
+                            Fetch
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPromptMode("insert")}
+                            className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${
+                              promptMode === "insert" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
+                            }`}
+                          >
+                            {InsertIcon()}
+                            Insert
+                          </button>
+                        </div>
+                        <label className="mt-2 inline-flex w-full items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#7e7058]">
+                          {ToolLimitIcon()}
+                          Tool Calls
+                          <select
+                            value={maxToolCalls}
+                            onChange={(event) => setMaxToolCalls(Number(event.target.value))}
+                            className="ml-auto rounded-md border border-[#d4c8b3] bg-white px-2 py-1 text-[11px] text-[#2f2a21]"
+                          >
+                            <option value={1}>1</option>
+                            <option value={2}>2</option>
+                            <option value={3}>3</option>
+                            <option value={4}>4</option>
+                            <option value={5}>5</option>
+                          </select>
+                        </label>
+                      </div>
+                    </details>
+
+                    <details className="group relative">
+                      <summary className="flex h-8 w-8 cursor-pointer list-none items-center justify-center rounded-lg border border-[#d9ceb9] bg-[#faf6ee] text-[#6c5e47] hover:bg-white [&::-webkit-details-marker]:hidden">
+                        {QuickActionsIcon()}
+                        <span className="sr-only">Open quick actions</span>
+                      </summary>
+                      <div className="absolute bottom-full left-0 z-20 mb-1.5 w-[min(78vw,380px)] rounded-xl border border-[#d8ccb6] bg-[#fffaf1] p-2.5 shadow-[0_8px_20px_rgba(0,0,0,0.08)]">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#7e7058]">
+                          Quick Actions
+                        </p>
+                        <div className="mt-2 flex max-h-[180px] flex-wrap gap-1.5 overflow-y-auto pr-1">
+                          {quickActions.map((item) => (
+                            <button
+                              key={item.title}
+                              type="button"
+                              onClick={() => handleQuickAction(item)}
+                              className="inline-flex items-center gap-1 rounded-md border border-[#d9ceb9] bg-[#faf6ee] px-2 py-1 text-[11px] font-medium text-[#5f523d] hover:bg-white"
+                            >
+                              <span className="text-[#6f6148]">{quickActionIcon(item.title)}</span>
+                              {item.title}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </details>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleNewChat}
+                      className="rounded-lg border border-[#d5c8b2] px-3 py-1.5 text-xs font-medium text-[#5f523d] hover:bg-[#f9f3e8]"
+                      disabled={!canSendPrompt}
+                    >
+                      Clear Current Chat
+                    </button>
+
+                    <button
+                      type="submit"
+                      className="rounded-xl bg-[#2f2a21] px-4 py-1.5 text-sm font-medium text-[#f8f5ef] disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={busy || !canSendPrompt}
+                    >
+                      {busy ? "Working..." : "Send"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </form>
+          </footer>
         </section>
-      )}
+      </div>
     </div>
   );
 }

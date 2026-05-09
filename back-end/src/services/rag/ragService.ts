@@ -4,6 +4,7 @@ import { geminiClient } from "../llm/geminiClient";
 import { ensureQdrantCollection, qdrantClient } from "./qdrantClient";
 import type { ParsedDocument } from "../files/documentParser";
 import { ApiError } from "../../utils/apiError";
+import type { UserRole } from "../../types/auth";
 
 const MAX_EMBEDDING_TEXT_CHARS = 6000;
 const UPLOAD_CHUNK_SIZE = 1400;
@@ -68,6 +69,26 @@ function unknownErrorMessage(error: unknown): string {
   return String(error);
 }
 
+function mapSearchResultsToChunks(
+  results: Awaited<ReturnType<typeof qdrantClient.search>>,
+  defaultLabel: string,
+): IAIContextChunk[] {
+  return results
+    .map((item) => {
+      const payload = (item.payload ?? {}) as Record<string, unknown>;
+      const content = typeof payload.content === "string" ? payload.content : "";
+
+      return {
+        sourceId: normalizePointId(item.id),
+        content,
+        score: item.score ?? 0,
+        sourceLabel: typeof payload.sourceLabel === "string" ? payload.sourceLabel : defaultLabel,
+        metadata: payload,
+      } satisfies IAIContextChunk;
+    })
+    .filter((chunk) => chunk.content.length > 0);
+}
+
 export const ragService = {
   async retrieveContext(patientId: string, query: string, limit = 3): Promise<IAIContextChunk[]> {
     let results: Awaited<ReturnType<typeof qdrantClient.search>>;
@@ -82,6 +103,10 @@ export const ragService = {
         with_payload: true,
         filter: {
           must: [
+            {
+              key: "scope",
+              match: { value: "patient" },
+            },
             {
               key: "patientId",
               match: { value: patientId },
@@ -99,21 +124,40 @@ export const ragService = {
       });
     }
 
-    return results
-      .map((item) => {
-        const payload = (item.payload ?? {}) as Record<string, unknown>;
-        const content = typeof payload.content === "string" ? payload.content : "";
+    return mapSearchResultsToChunks(results, "qdrant_patient_context");
+  },
 
-        return {
-          sourceId: normalizePointId(item.id),
-          content,
-          score: item.score ?? 0,
-          sourceLabel:
-            typeof payload.sourceLabel === "string" ? payload.sourceLabel : "qdrant_patient_context",
-          metadata: payload,
-        } satisfies IAIContextChunk;
-      })
-      .filter((chunk) => chunk.content.length > 0);
+  async retrieveGlobalContext(query: string, limit = 5): Promise<IAIContextChunk[]> {
+    let results: Awaited<ReturnType<typeof qdrantClient.search>>;
+
+    try {
+      await ensureQdrantCollection();
+      const queryVector = await geminiClient.embedText(query);
+
+      results = await qdrantClient.search(env.QDRANT_COLLECTION, {
+        vector: queryVector,
+        limit,
+        with_payload: true,
+        filter: {
+          must: [
+            {
+              key: "scope",
+              match: { value: "global" },
+            },
+          ],
+        },
+      });
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+
+      throw new ApiError(502, `Global RAG retrieval failed: ${unknownErrorMessage(error)}`, {
+        collection: env.QDRANT_COLLECTION,
+      });
+    }
+
+    return mapSearchResultsToChunks(results, "qdrant_global_context");
   },
 
   async indexRecord(record: IAIRecordDocument): Promise<void> {
@@ -130,6 +174,7 @@ export const ragService = {
           id: record._id.toString(),
           vector: embedding,
           payload: {
+            scope: "patient",
             patientId: record.patientId.toString(),
             recordId: record._id.toString(),
             content: record.response,
@@ -177,6 +222,7 @@ export const ragService = {
           id: `${input.record._id.toString()}:file:${docIndex}:${chunkIndex}`,
           vector: embedding,
           payload: {
+            scope: "patient",
             patientId: input.record.patientId.toString(),
             recordId: input.record._id.toString(),
             content: chunk,
@@ -188,6 +234,70 @@ export const ragService = {
             createdBy: input.record.createdBy.toString(),
             createdByRole: input.record.createdByRole,
             createdAt: input.record.createdAt.toISOString(),
+          },
+        });
+      }
+
+      totalChunks += limitedChunks.length;
+      if (totalChunks >= MAX_UPLOAD_CHUNKS_PER_RECORD) {
+        break;
+      }
+    }
+
+    if (points.length > 0) {
+      await qdrantClient.upsert(env.QDRANT_COLLECTION, {
+        wait: true,
+        points,
+      });
+    }
+
+    return chunkStats;
+  },
+
+  async indexGlobalDocuments(input: {
+    documents: ParsedDocument[];
+    actorId: string;
+    actorRole: UserRole;
+  }): Promise<Array<{ fileName: string; chunkCount: number }>> {
+    await ensureQdrantCollection();
+
+    const points: Array<{
+      id: string;
+      vector: number[];
+      payload: Record<string, unknown>;
+    }> = [];
+    const chunkStats: Array<{ fileName: string; chunkCount: number }> = [];
+
+    let totalChunks = 0;
+
+    for (let docIndex = 0; docIndex < input.documents.length; docIndex += 1) {
+      const doc = input.documents[docIndex];
+      const chunks = chunkText(doc.text, UPLOAD_CHUNK_SIZE, UPLOAD_CHUNK_OVERLAP);
+      const limitedChunks = chunks.slice(0, Math.max(0, MAX_UPLOAD_CHUNKS_PER_RECORD - totalChunks));
+
+      chunkStats.push({
+        fileName: doc.fileName,
+        chunkCount: limitedChunks.length,
+      });
+
+      for (let chunkIndex = 0; chunkIndex < limitedChunks.length; chunkIndex += 1) {
+        const chunk = limitedChunks[chunkIndex];
+        const embedding = await geminiClient.embedText(truncateText(chunk, MAX_EMBEDDING_TEXT_CHARS));
+
+        points.push({
+          id: `global:${Date.now()}:${docIndex}:${chunkIndex}:${Math.random().toString(36).slice(2, 10)}`,
+          vector: embedding,
+          payload: {
+            scope: "global",
+            content: chunk,
+            sourceLabel: `global_file_${doc.extension.replace(/^\./, "")}`,
+            fileName: doc.fileName,
+            mimeType: doc.mimeType,
+            fileExtension: doc.extension,
+            chunkIndex,
+            createdBy: input.actorId,
+            createdByRole: input.actorRole,
+            createdAt: new Date().toISOString(),
           },
         });
       }

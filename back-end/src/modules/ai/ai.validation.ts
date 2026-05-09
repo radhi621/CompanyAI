@@ -31,6 +31,12 @@ export const uploadAIRecordSchema = z.object({
   }),
 });
 
+export const uploadGlobalKnowledgeSchema = z.object({
+  body: z.object({
+    note: optionalTrimmedString(1, 500),
+  }),
+});
+
 export const listAIRecordSchema = z.object({
   query: z.object({
     patientId: objectIdSchema.optional(),

@@ -32,6 +32,12 @@ interface UploadAIRecordFromFilesInput {
   files: Express.Multer.File[];
 }
 
+interface UploadGlobalKnowledgeInput {
+  actor: AuthUser;
+  files: Express.Multer.File[];
+  note?: string;
+}
+
 interface ListAIRecordsInput {
   actor: AuthUser;
   patientId?: string;
@@ -236,6 +242,33 @@ export const aiService = {
     }
 
     return record;
+  },
+
+  async uploadGlobalKnowledgeFromFiles(input: UploadGlobalKnowledgeInput): Promise<{
+    note?: string;
+    totalFiles: number;
+    totalChunks: number;
+    fileStats: Array<{ fileName: string; chunkCount: number }>;
+  }> {
+    if (input.actor.role !== "admin") {
+      throw new ApiError(403, "Only admin can upload global knowledge files");
+    }
+
+    const documents = await parseUploadedDocuments(input.files);
+    const chunkStats = await ragService.indexGlobalDocuments({
+      documents,
+      actorId: input.actor.id,
+      actorRole: input.actor.role,
+    });
+
+    const totalChunks = chunkStats.reduce((sum, item) => sum + item.chunkCount, 0);
+
+    return {
+      note: input.note,
+      totalFiles: documents.length,
+      totalChunks,
+      fileStats: chunkStats,
+    };
   },
 
   async listRecords(input: ListAIRecordsInput): Promise<IAIRecordDocument[]> {
