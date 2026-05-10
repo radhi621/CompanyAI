@@ -15,7 +15,7 @@ export interface ParsedDocument {
   text: string;
 }
 
-const MAX_PARSED_TEXT_CHARS = 180_000;
+const MAX_PARSED_TEXT_CHARS = 500_000;
 
 const SUPPORTED_EXTENSIONS = new Set([
   ".pdf",

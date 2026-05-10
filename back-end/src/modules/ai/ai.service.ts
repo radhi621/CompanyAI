@@ -86,7 +86,7 @@ async function assertPatientAccess(patientId: string, actor: AuthUser): Promise<
 function buildMedicalAssistantPrompt(actor: AuthUser, prompt: string, ragContext: string): string {
   return [
     "You are MediAssist IA for a professional medical department.",
-    "Return concise, accurate, role-aware operational responses for clinical office workflows.",
+    "Return detailed, accurate, role-aware operational responses for clinical office workflows. Provide thorough explanations covering all relevant details.",
     `Requester role: ${actor.role}`,
     "If the prompt asks for insertion/update guidance, provide structured data-focused output suitable for system storage.",
     `RAG Context:\n${ragContext}`,
@@ -159,9 +159,11 @@ export const aiService = {
       },
     });
 
-    void ragService.indexRecord(record).catch(() => {
-      return;
-    });
+    try {
+      await ragService.indexRecord(record);
+    } catch (error) {
+      console.error(`Failed to index record ${record._id} into Qdrant:`, error instanceof Error ? error.message : String(error));
+    }
 
     return record;
   },
@@ -207,38 +209,28 @@ export const aiService = {
       },
     });
 
-    void ragService.indexRecord(record).catch(() => {
-      return;
-    });
+    try {
+      await ragService.indexRecord(record);
+    } catch (error) {
+      console.error(`Failed to index record ${record._id} into Qdrant:`, error instanceof Error ? error.message : String(error));
+    }
 
     if (input.mode === "rag") {
-      void ragService
-        .indexUploadedFileChunks({
-          record,
-          documents,
-        })
-        .then((chunkStats) => {
-          if (chunkStats.length === 0) {
-            return;
-          }
-
+      try {
+        const chunkStats = await ragService.indexUploadedFileChunks({ record, documents });
+        if (chunkStats.length > 0) {
           record.sourceFiles = record.sourceFiles.map((sourceFile) => {
             const matching = chunkStats.find((item) => item.fileName === sourceFile.fileName);
             if (!matching) {
               return sourceFile;
             }
-
-            return {
-              ...sourceFile,
-              chunkCount: matching.chunkCount,
-            };
+            return { ...sourceFile, chunkCount: matching.chunkCount };
           });
-
-          return record.save();
-        })
-        .catch(() => {
-          return;
-        });
+          await record.save();
+        }
+      } catch (error) {
+        console.error(`Failed to index uploaded file chunks for record ${record._id}:`, error instanceof Error ? error.message : String(error));
+      }
     }
 
     return record;
@@ -338,9 +330,11 @@ export const aiService = {
     await record.save();
 
     if (response !== undefined) {
-      void ragService.indexRecord(record).catch(() => {
-        return;
-      });
+      try {
+        await ragService.indexRecord(record);
+      } catch (error) {
+        console.error(`Failed to re-index record ${record._id} after update:`, error instanceof Error ? error.message : String(error));
+      }
     }
 
     return record;
@@ -351,9 +345,11 @@ export const aiService = {
     record.deletedBy = new Types.ObjectId(actor.id);
     record.updatedBy = new Types.ObjectId(actor.id);
     await record.save();
-    void ragService.deleteRecordVector(record._id.toString()).catch(() => {
-      return;
-    });
+    try {
+      await ragService.deleteRecordVector(record._id.toString());
+    } catch (error) {
+      console.error(`Failed to delete Qdrant vectors for record ${record._id}:`, error instanceof Error ? error.message : String(error));
+    }
   },
 
   async restoreRecord(recordId: string, actor: AuthUser): Promise<IAIRecordDocument> {
@@ -371,9 +367,11 @@ export const aiService = {
     record.updatedBy = new Types.ObjectId(actor.id);
     await record.save();
 
-    void ragService.indexRecord(record).catch(() => {
-      return;
-    });
+    try {
+      await ragService.indexRecord(record);
+    } catch (error) {
+      console.error(`Failed to re-index restored record ${record._id}:`, error instanceof Error ? error.message : String(error));
+    }
 
     return record;
   },

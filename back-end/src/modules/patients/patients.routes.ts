@@ -10,4 +10,5 @@ patientRoutes.use(authenticate, authorize("admin", "doctor", "nurse", "secretary
 patientRoutes.post("/", authorize("admin", "secretary"), patientsController.create);
 patientRoutes.get("/", patientsController.list);
 patientRoutes.get("/:patientId", patientsController.getById);
+patientRoutes.patch("/:patientId", authorize("admin", "secretary"), patientsController.update);
 patientRoutes.patch("/:patientId/assignments", authorize("admin"), patientsController.updateAssignments);

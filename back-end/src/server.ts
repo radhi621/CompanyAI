@@ -1,7 +1,8 @@
 import { app } from "./app";
 import { connectDatabase, disconnectDatabase } from "./config/database";
 import { env } from "./config/env";
-
+import { setServers } from "node:dns/promises";
+setServers(["1.1.1.1", "8.8.8.8"]); 
 async function startServer(): Promise<void> {
   await connectDatabase();
 

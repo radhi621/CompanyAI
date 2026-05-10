@@ -20,6 +20,10 @@ export const geminiClient = {
       response = await gemini.models.generateContent({
         model: env.GEMINI_MODEL,
         contents: prompt,
+        config: {
+          maxOutputTokens: 2048,
+          temperature: 0.7,
+        },
       });
     } catch (error) {
       throw new ApiError(502, `Gemini generation failed: ${errorMessage(error)}`, {

@@ -6,6 +6,7 @@ import {
   createPatientSchema,
   listPatientsSchema,
   patientIdSchema,
+  updatePatientSchema,
   updateAssignmentsSchema,
 } from "./patients.validation";
 
@@ -54,6 +55,16 @@ export const patientsController = {
 
     res.status(200).json({
       message: "Patient fetched successfully",
+      data: patient,
+    });
+  }),
+
+  update: asyncHandler(async (req: Request, res: Response) => {
+    const parsed = updatePatientSchema.parse({ params: req.params, body: req.body });
+    const patient = await patientsService.update(parsed.params.patientId, parsed.body);
+
+    res.status(200).json({
+      message: "Patient updated successfully",
       data: patient,
     });
   }),

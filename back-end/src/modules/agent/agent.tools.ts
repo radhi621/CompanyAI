@@ -204,6 +204,45 @@ const toolRegistry = {
     },
   }),
 
+  update_patient: defineTool({
+    description: "Updates patient fields such as phone, email, date of birth, or pathologies",
+    allowedRoles: ["admin", "secretary"],
+    destructive: false,
+    argsShape: {
+      patientId: "required MongoDB ObjectId",
+      phone: "optional string",
+      email: "optional email",
+      dateOfBirth: "optional date string YYYY-MM-DD",
+      pathologies: "optional array of strings",
+    },
+    argsSchema: z.object({
+      patientId: objectIdSchema,
+      phone: z.string().min(5).max(30).optional(),
+      email: z.string().email().optional(),
+      dateOfBirth: z.coerce.date().optional(),
+      pathologies: z.array(z.string().min(2).max(100)).optional(),
+    }),
+    run: async (args, context) => {
+      const patient = await patientsService.update(args.patientId, {
+        phone: args.phone?.trim(),
+        email: args.email?.trim().toLowerCase(),
+        dateOfBirth: args.dateOfBirth,
+        pathologies: args.pathologies,
+      });
+
+      return {
+        patientId: patient._id.toString(),
+        firstName: patient.firstName,
+        lastName: patient.lastName,
+        cin: patient.cin,
+        phone: patient.phone ?? null,
+        email: patient.email ?? null,
+        dateOfBirth: patient.dateOfBirth ?? null,
+        pathologies: patient.pathologies,
+      };
+    },
+  }),
+
   list_patients: defineTool({
     description: "Lists accessible patients for the requester",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
@@ -612,7 +651,7 @@ const toolRegistry = {
         deletedAt: { $exists: false },
       })
         .sort({ createdAt: -1 })
-        .limit(25)
+        .limit(100)
         .select("_id mode provider response contextChunks createdAt");
 
       const fallbackMatches = records
@@ -693,10 +732,85 @@ const toolRegistry = {
     run: async (args) => {
       const chunks = await ragService.retrieveGlobalContext(args.query, args.limit);
 
+      if (chunks.length > 0) {
+        return {
+          query: args.query,
+          matches: chunks,
+          scope: "global",
+        };
+      }
+
+      const terms = extractSearchTerms(args.query);
+      if (terms.length === 0) {
+        return {
+          query: args.query,
+          matches: [],
+          scope: "global",
+          fallbackUsed: "mongo_ai_records",
+        };
+      }
+
+      const records = await AIRecordModel.find({
+        deletedAt: { $exists: false },
+      })
+        .sort({ createdAt: -1 })
+        .limit(100)
+        .select("_id mode provider response contextChunks createdAt");
+
+      const fallbackMatches = records
+        .flatMap((record) => {
+          const responseText = record.response?.trim() ?? "";
+          const responseScore = scoreTextMatch(responseText, terms);
+
+          const responseMatch =
+            responseScore > 0
+              ? [{
+                  sourceId: `global:record:${record._id.toString()}:response`,
+                  content: truncateResultContent(responseText),
+                  score: responseScore,
+                  sourceLabel: `mongo_global_record_${record.mode}`,
+                  metadata: {
+                    recordId: record._id.toString(),
+                    provider: record.provider,
+                    createdAt: record.createdAt?.toISOString?.(),
+                    fallback: true,
+                    sourceType: "record_response",
+                  },
+                }]
+              : [];
+
+          const chunkMatches = record.contextChunks
+            .map((chunk, index) => {
+              const chunkText = (chunk.content ?? "").trim();
+              const chunkScore = scoreTextMatch(chunkText, terms);
+              if (chunkScore <= 0) return null;
+              return {
+                sourceId: `global:record:${record._id.toString()}:chunk:${index}`,
+                content: truncateResultContent(chunkText),
+                score: chunkScore,
+                sourceLabel: chunk.sourceLabel || `mongo_global_chunk_${record.mode}`,
+                metadata: {
+                  ...(chunk.metadata ?? {}),
+                  recordId: record._id.toString(),
+                  provider: record.provider,
+                  createdAt: record.createdAt?.toISOString?.(),
+                  fallback: true,
+                  sourceType: "context_chunk",
+                },
+              };
+            })
+            .filter((item): item is NonNullable<typeof item> => item !== null);
+
+          return [...responseMatch, ...chunkMatches];
+        })
+        .sort((a, b) => b.score - a.score)
+        .slice(0, args.limit);
+
       return {
         query: args.query,
-        matches: chunks,
+        matches: fallbackMatches,
         scope: "global",
+        fallbackUsed: "mongo_ai_records",
       };
     },
   }),
@@ -727,6 +841,79 @@ const toolRegistry = {
         noteId: note._id.toString(),
         patientId: args.patientId,
         createdAt: note.createdAt,
+      };
+    },
+  }),
+
+  list_patient_notes: defineTool({
+    description: "Lists patient notes from the database, ordered by most recent",
+    allowedRoles: ["admin", "doctor", "nurse", "secretary"],
+    destructive: false,
+    argsShape: {
+      patientId: "required MongoDB ObjectId",
+      limit: "optional number max 50",
+    },
+    argsSchema: z.object({
+      patientId: objectIdSchema,
+      limit: z.coerce.number().int().positive().max(50).default(20),
+    }),
+    run: async (args, context) => {
+      await assertPatientAccess(context.actor, args.patientId);
+
+      const notes = await PatientNoteModel.find({
+        patientId: new Types.ObjectId(args.patientId),
+        deletedAt: { $exists: false },
+      })
+        .sort({ createdAt: -1 })
+        .limit(args.limit)
+        .select("content createdBy createdByRole createdAt")
+        .populate("createdBy", "name role");
+
+      return {
+        patientId: args.patientId,
+        total: notes.length,
+        notes: notes.map((note) => ({
+          noteId: note._id.toString(),
+          content: note.content,
+          createdBy: (note.createdBy as unknown as { name?: string })?.name ?? "Unknown",
+          createdByRole: note.createdByRole,
+          createdAt: note.createdAt,
+        })),
+      };
+    },
+  }),
+
+  delete_patient_note: defineTool({
+    description: "Soft-deletes a specific patient note by its ID. Admin can delete any note; other roles can only delete their own notes.",
+    allowedRoles: ["admin", "doctor", "nurse", "secretary"],
+    destructive: true,
+    argsShape: {
+      noteId: "required MongoDB ObjectId",
+    },
+    argsSchema: z.object({
+      noteId: objectIdSchema,
+    }),
+    run: async (args, context) => {
+      const note = await PatientNoteModel.findOne({
+        _id: new Types.ObjectId(args.noteId),
+        deletedAt: { $exists: false },
+      });
+
+      if (!note) {
+        throw new ApiError(404, "Patient note not found or already deleted");
+      }
+
+      if (context.actor.role !== "admin" && note.createdBy.toString() !== context.actor.id) {
+        throw new ApiError(403, "You can only delete your own notes");
+      }
+
+      note.deletedAt = new Date();
+      note.deletedBy = new Types.ObjectId(context.actor.id);
+      await note.save();
+
+      return {
+        noteId: note._id.toString(),
+        deletedAt: note.deletedAt,
       };
     },
   }),

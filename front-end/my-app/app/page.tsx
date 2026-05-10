@@ -82,9 +82,17 @@ interface PatientFolder {
   createdAt: number;
 }
 
-interface ConversationState {
+interface ChatSession {
+  id: string;
   messages: ChatMessage[];
   pendingAction: PendingActionState | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface ConversationState {
+  activeSessionId: string;
+  sessions: Record<string, ChatSession>;
 }
 
 type ConversationMap = Record<string, ConversationState>;
@@ -424,11 +432,6 @@ function summarizeExecutionResult(result: AgentExecutionResult): string {
     }
   }
 
-  const toolSummaryLines = summarizeToolExecutionLines(result.results);
-  if (toolSummaryLines.length > 0) {
-    readableLines.push(...toolSummaryLines);
-  }
-
   if (readableLines.length === 0) {
     return "Done. Execution completed.";
   }
@@ -437,13 +440,7 @@ function summarizeExecutionResult(result: AgentExecutionResult): string {
 }
 
 function summarizeConfirmResult(result: AgentConfirmResult): string {
-  const lines = [result.message];
-  const toolSummaryLines = summarizeToolExecutionLines(result.results);
-  if (toolSummaryLines.length > 0) {
-    lines.push(...toolSummaryLines);
-  }
-
-  return lines.join("\n");
+  return result.message ?? "Pending action confirmed and executed successfully.";
 }
 
 function buildPromptWithMode(input: {
@@ -667,11 +664,26 @@ function DropdownSection(input: {
   );
 }
 
-function getEmptyConversation(): ConversationState {
+function createSession(): ChatSession {
   return {
+    id: createId("sess"),
     messages: [],
     pendingAction: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
   };
+}
+
+function getEmptyConversation(): ConversationState {
+  const session = createSession();
+  return {
+    activeSessionId: session.id,
+    sessions: { [session.id]: session },
+  };
+}
+
+function getActiveSession(conversation: ConversationState): ChatSession {
+  return conversation.sessions[conversation.activeSessionId] ?? createSession();
 }
 
 function isMessageRole(value: unknown): value is MessageRole {
@@ -732,48 +744,98 @@ function parseStoredConversations(raw: string | null): ConversationMap {
         continue;
       }
 
-      const rawMessages = Array.isArray(value.messages) ? value.messages : [];
-      const messages = rawMessages.flatMap((item) => {
-        if (!isRecord(item)) {
-          return [];
+      // Migrate from old format (single conversation with messages/pendingAction)
+      if (Array.isArray(value.messages)) {
+        const messages: ChatMessage[] = value.messages.flatMap((item: unknown) => {
+          if (!isRecord(item)) return [];
+          const id = toOptionalString(item.id);
+          const text = toOptionalString(item.text);
+          const role = item.role;
+          const createdAt = typeof item.createdAt === "number" ? item.createdAt : Date.now();
+          if (!id || !text || !isMessageRole(role)) return [];
+          return [{ id, role, text, createdAt, raw: item.raw }];
+        });
+
+        let pendingAction: PendingActionState | null = null;
+        if (isRecord(value.pendingAction)) {
+          const pendingId = toOptionalString(value.pendingAction.id);
+          if (pendingId) {
+            pendingAction = {
+              id: pendingId,
+              expiresAt: toOptionalString(value.pendingAction.expiresAt),
+              plannedToolCalls: sanitizeToolCalls(value.pendingAction.plannedToolCalls),
+            };
+          }
         }
 
-        const id = toOptionalString(item.id);
-        const text = toOptionalString(item.text);
-        const role = item.role;
-        const createdAt = typeof item.createdAt === "number" ? item.createdAt : Date.now();
-
-        if (!id || !text || !isMessageRole(role)) {
-          return [];
-        }
-
-        return [
-          {
-            id,
-            role,
-            text,
-            createdAt,
-            raw: item.raw,
-          } satisfies ChatMessage,
-        ];
-      });
-
-      let pendingAction: PendingActionState | null = null;
-      if (isRecord(value.pendingAction)) {
-        const pendingId = toOptionalString(value.pendingAction.id);
-        if (pendingId) {
-          pendingAction = {
-            id: pendingId,
-            expiresAt: toOptionalString(value.pendingAction.expiresAt),
-            plannedToolCalls: sanitizeToolCalls(value.pendingAction.plannedToolCalls),
-          };
-        }
+        const sessionId = createId("sess");
+        output[conversationId] = {
+          activeSessionId: sessionId,
+          sessions: {
+            [sessionId]: {
+              id: sessionId,
+              messages,
+              pendingAction,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+          },
+        };
+        continue;
       }
 
-      output[conversationId] = {
-        messages,
-        pendingAction,
-      };
+      // New format with sessions
+      if (isRecord(value.sessions)) {
+        const sessions: Record<string, ChatSession> = {};
+        for (const [sessionId, sessionValue] of Object.entries(value.sessions)) {
+          if (!isRecord(sessionValue)) continue;
+          const rawMessages = Array.isArray(sessionValue.messages) ? sessionValue.messages : [];
+          const messages: ChatMessage[] = rawMessages.flatMap((item: unknown) => {
+            if (!isRecord(item)) return [];
+            const id = toOptionalString(item.id);
+            const text = toOptionalString(item.text);
+            const role = item.role;
+            const createdAt = typeof item.createdAt === "number" ? item.createdAt : Date.now();
+            if (!id || !text || !isMessageRole(role)) return [];
+            return [{ id, role, text, createdAt, raw: item.raw }];
+          });
+
+          let pendingAction: PendingActionState | null = null;
+          if (isRecord(sessionValue.pendingAction)) {
+            const pendingId = toOptionalString(sessionValue.pendingAction.id);
+            if (pendingId) {
+              pendingAction = {
+                id: pendingId,
+                expiresAt: toOptionalString(sessionValue.pendingAction.expiresAt),
+                plannedToolCalls: sanitizeToolCalls(sessionValue.pendingAction.plannedToolCalls),
+              };
+            }
+          }
+
+          sessions[sessionId] = {
+            id: sessionId,
+            messages,
+            pendingAction,
+            createdAt: typeof sessionValue.createdAt === "number" ? sessionValue.createdAt : Date.now(),
+            updatedAt: typeof sessionValue.updatedAt === "number" ? sessionValue.updatedAt : Date.now(),
+          };
+        }
+
+        const activeSessionId = toOptionalString(value.activeSessionId);
+        const validSessionId = activeSessionId && sessions[activeSessionId] ? activeSessionId : Object.keys(sessions)[0] ?? createId("sess");
+
+        if (!sessions[validSessionId]) {
+          const newSession = createSession();
+          sessions[newSession.id] = newSession;
+          output[conversationId] = { activeSessionId: newSession.id, sessions };
+        } else {
+          output[conversationId] = { activeSessionId: validSessionId, sessions };
+        }
+        continue;
+      }
+
+      // Fallback: create empty
+      output[conversationId] = getEmptyConversation();
     }
 
     if (!output[GLOBAL_CONVERSATION_ID]) {
@@ -788,12 +850,13 @@ function parseStoredConversations(raw: string | null): ConversationMap {
   }
 }
 
-function ensureConversation(map: ConversationMap, id: string | null): ConversationState {
+function ensureConversation(map: ConversationMap, id: string | null): ChatSession {
   if (!id) {
-    return getEmptyConversation();
+    return getActiveSession(getEmptyConversation());
   }
 
-  return map[id] ?? getEmptyConversation();
+  const conversation = map[id] ?? getEmptyConversation();
+  return getActiveSession(conversation);
 }
 
 function getConversationKey(scope: ChatScope, activeFolderId: string | null): string | null {
@@ -907,15 +970,42 @@ export default function Home() {
 
   const quickActions = useMemo(() => QUICK_ACTIONS, []);
 
-  const folderStats = useMemo(() => {
+  interface FolderStats {
+    folderId: string;
+    totalMessages: number;
+    sessionCount: number;
+    lastMessageAt: number | undefined;
+    sessions: Array<{ id: string; messageCount: number; lastMessageAt: number | undefined; isActive: boolean }>;
+  }
+
+  const folderStats: FolderStats[] = useMemo(() => {
     return folders.map((folder) => {
-      const conversation = ensureConversation(conversations, folder.id);
-      const lastMessage = conversation.messages[conversation.messages.length - 1];
+      const conversation = conversations[folder.id] ?? getEmptyConversation();
+      const sessionList = Object.values(conversation.sessions);
+      let totalMessages = 0;
+      let lastMessageAt: number | undefined;
+      const sessions = sessionList.map((session) => {
+        const msgCount = session.messages.length;
+        totalMessages += msgCount;
+        const last = session.messages[session.messages.length - 1];
+        const lastAt = last?.createdAt;
+        if (lastAt && (!lastMessageAt || lastAt > lastMessageAt)) {
+          lastMessageAt = lastAt;
+        }
+        return {
+          id: session.id,
+          messageCount: msgCount,
+          lastMessageAt: lastAt,
+          isActive: session.id === conversation.activeSessionId,
+        };
+      });
 
       return {
         folderId: folder.id,
-        messageCount: conversation.messages.length,
-        lastMessageAt: lastMessage?.createdAt,
+        totalMessages,
+        sessionCount: sessionList.length,
+        lastMessageAt,
+        sessions,
       };
     });
   }, [conversations, folders]);
@@ -927,20 +1017,22 @@ export default function Home() {
       }
 
       setConversations((current) => {
-        const existing = ensureConversation(current, conversationId);
+        const conversation = current[conversationId] ?? getEmptyConversation();
+        const session = conversation.sessions[conversation.activeSessionId] ?? createSession();
+        const newMessage: ChatMessage = { ...message, id: createId("msg"), createdAt: Date.now() };
 
         return {
           ...current,
           [conversationId]: {
-            ...existing,
-            messages: [
-              ...existing.messages,
-              {
-                ...message,
-                id: createId("msg"),
-                createdAt: Date.now(),
+            ...conversation,
+            sessions: {
+              ...conversation.sessions,
+              [session.id]: {
+                ...session,
+                messages: [...session.messages, newMessage],
+                updatedAt: Date.now(),
               },
-            ],
+            },
           },
         };
       });
@@ -954,13 +1046,25 @@ export default function Home() {
         return;
       }
 
-      setConversations((current) => ({
-        ...current,
-        [conversationId]: {
-          ...ensureConversation(current, conversationId),
-          pendingAction,
-        },
-      }));
+      setConversations((current) => {
+        const conversation = current[conversationId] ?? getEmptyConversation();
+        const session = conversation.sessions[conversation.activeSessionId] ?? createSession();
+
+        return {
+          ...current,
+          [conversationId]: {
+            ...conversation,
+            sessions: {
+              ...conversation.sessions,
+              [session.id]: {
+                ...session,
+                pendingAction,
+                updatedAt: Date.now(),
+              },
+            },
+          },
+        };
+      });
     },
     [],
   );
@@ -970,14 +1074,22 @@ export default function Home() {
       return;
     }
 
-    setConversations((current) => ({
-      ...current,
-      [conversationId]: {
-        ...ensureConversation(current, conversationId),
-        messages: [],
-        pendingAction: null,
-      },
-    }));
+    setConversations((current) => {
+      const conversation = current[conversationId] ?? getEmptyConversation();
+      const newSession = createSession();
+
+      return {
+        ...current,
+        [conversationId]: {
+          ...conversation,
+          activeSessionId: newSession.id,
+          sessions: {
+            ...conversation.sessions,
+            [newSession.id]: newSession,
+          },
+        },
+      };
+    });
   }, []);
 
   const clearSession = useCallback(() => {
@@ -1284,6 +1396,51 @@ export default function Home() {
     setFeedback("Folder deleted.");
   };
 
+  const handleDeleteSession = (folderId: string, sessionId: string) => {
+    setConversations((current) => {
+      const conversation = current[folderId];
+      if (!conversation || !conversation.sessions[sessionId]) {
+        return current;
+      }
+
+      const remaining = Object.keys(conversation.sessions).filter((id) => id !== sessionId);
+      if (remaining.length === 0) {
+        return current;
+      }
+
+      const newSessions: Record<string, ChatSession> = {};
+      for (const id of remaining) {
+        newSessions[id] = conversation.sessions[id];
+      }
+
+      const wasActive = conversation.activeSessionId === sessionId;
+      return {
+        ...current,
+        [folderId]: {
+          ...conversation,
+          activeSessionId: wasActive ? remaining[remaining.length - 1] : conversation.activeSessionId,
+          sessions: newSessions,
+        },
+      };
+    });
+  };
+
+  const handleSwitchSession = (folderId: string, sessionId: string) => {
+    setConversations((current) => {
+      const conversation = current[folderId];
+      if (!conversation || !conversation.sessions[sessionId]) {
+        return current;
+      }
+      return {
+        ...current,
+        [folderId]: {
+          ...conversation,
+          activeSessionId: sessionId,
+        },
+      };
+    });
+  };
+
   const handleNewChat = () => {
     if (!activeConversationKey) {
       setFeedback("Create or select a patient folder first.");
@@ -1292,7 +1449,7 @@ export default function Home() {
 
     clearConversation(activeConversationKey);
     setPromptInput("");
-    setFeedback("Started a new chat in this context.");
+    setFeedback("Started a new session. Previous sessions are preserved.");
   };
 
   const handleQuickAction = (action: { mode: PromptMode; prompt: string }) => {
@@ -1743,7 +1900,7 @@ export default function Home() {
                       )}
                     </div>
 
-                    <div className="mt-2 max-h-[190px] space-y-2 overflow-y-auto pr-1">
+                    <div className="mt-2 max-h-[250px] space-y-2 overflow-y-auto pr-1">
                       {folders.length === 0 && (
                         <p className="rounded-lg border border-dashed border-[#d8ccb6] px-2 py-2 text-xs text-[#8a7c62]">
                           No patient folders yet.
@@ -1774,10 +1931,55 @@ export default function Home() {
                               <p className="text-xs font-semibold text-[#3c3327]">{folder.name}</p>
                               <p className="mt-1 break-all text-[10px] text-[#7c6e55]">{folder.patientId}</p>
                               <p className="mt-1 text-[10px] text-[#8e7f63]">
-                                {stats?.messageCount ?? 0} messages
+                                {stats?.totalMessages ?? 0} messages across {stats?.sessionCount ?? 1} session(s)
                                 {stats?.lastMessageAt ? ` | ${formatDateTime(stats.lastMessageAt)}` : ""}
                               </p>
                             </button>
+
+                            {stats && stats.sessions.length > 1 && (
+                              <details className="mt-1">
+                                <summary className="cursor-pointer text-[10px] text-[#7c6e55]">
+                                  Sessions ({stats.sessions.length})
+                                </summary>
+                                <div className="mt-1 space-y-1">
+                                  {stats.sessions.map((session) => (
+                                    <div
+                                      key={session.id}
+                                      className="flex items-center gap-1"
+                                    >
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setActiveFolderId(folder.id);
+                                          setChatScope("patient");
+                                          handleSwitchSession(folder.id, session.id);
+                                        }}
+                                        className={`flex-1 rounded px-2 py-1 text-left text-[10px] ${
+                                          session.isActive
+                                            ? "bg-[#e0d5c0] font-semibold text-[#2f2a21]"
+                                            : "text-[#6a5b43] hover:bg-[#efeadc]"
+                                        }`}
+                                      >
+                                        {session.messageCount} msg{session.messageCount !== 1 ? "s" : ""}
+                                        {session.lastMessageAt
+                                          ? ` | ${formatDateTime(session.lastMessageAt)}`
+                                          : " | empty"}
+                                        {session.isActive ? " (active)" : ""}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteSession(folder.id, session.id)}
+                                        className="rounded px-1 py-1 text-[10px] text-[#7f3f3f] hover:bg-[#fff1ef]"
+                                        title="Delete session"
+                                      >
+                                        ✕
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              </details>
+                            )}
+
                             <button
                               type="button"
                               onClick={() => handleDeleteFolder(folder.id)}

@@ -27,6 +27,18 @@ export const patientIdSchema = z.object({
   }),
 });
 
+export const updatePatientSchema = z.object({
+  params: z.object({
+    patientId: objectIdSchema,
+  }),
+  body: z.object({
+    phone: z.string().min(5).max(30).optional(),
+    email: z.string().email().optional(),
+    dateOfBirth: z.coerce.date().optional(),
+    pathologies: z.array(z.string().min(2).max(100)).optional(),
+  }),
+});
+
 export const updateAssignmentsSchema = z.object({
   params: z.object({
     patientId: objectIdSchema,

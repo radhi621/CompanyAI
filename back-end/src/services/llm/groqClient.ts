@@ -12,14 +12,15 @@ export const groqClient = {
         {
           role: "system",
           content:
-            "You are MediAssist IA, a professional medical-office AI assistant. Return concise, accurate, and actionable outputs.",
+            "You are MediAssist IA, a professional medical-office AI assistant. Return detailed, thorough, and actionable outputs covering all relevant information.",
         },
         {
           role: "user",
           content: prompt,
         },
       ],
-      temperature: 0.2,
+      max_tokens: 2048,
+      temperature: 0.7,
     });
 
     const text = completion.choices[0]?.message?.content?.trim();

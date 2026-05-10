@@ -19,6 +19,10 @@ function truncateText(value: string, maxLength: number): string {
   return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
+function splitSentences(text: string): string[] {
+  return text.split(/(?<=[.!?])\s+/);
+}
+
 function chunkText(value: string, chunkSize: number, overlap: number): string[] {
   const normalized = value.trim();
   if (!normalized) {
@@ -29,24 +33,33 @@ function chunkText(value: string, chunkSize: number, overlap: number): string[] 
     return [normalized];
   }
 
+  const sentences = splitSentences(normalized);
   const chunks: string[] = [];
-  let start = 0;
+  let currentChunk = "";
 
-  while (start < normalized.length) {
-    const end = Math.min(normalized.length, start + chunkSize);
-    const chunk = normalized.slice(start, end).trim();
-    if (chunk) {
-      chunks.push(chunk);
+  for (const sentence of sentences) {
+    if ((currentChunk + " " + sentence).trim().length <= chunkSize) {
+      currentChunk = (currentChunk + " " + sentence).trim();
+    } else {
+      if (currentChunk) {
+        chunks.push(currentChunk);
+      }
+
+      if (sentence.length > chunkSize) {
+        for (let i = 0; i < sentence.length; i += chunkSize - overlap) {
+          chunks.push(sentence.slice(i, i + chunkSize).trim());
+        }
+      } else {
+        currentChunk = sentence;
+      }
     }
-
-    if (end >= normalized.length) {
-      break;
-    }
-
-    start = Math.max(0, end - overlap);
   }
 
-  return chunks;
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks.filter((chunk) => chunk.length > 0);
 }
 
 function normalizePointId(pointId: unknown): string {

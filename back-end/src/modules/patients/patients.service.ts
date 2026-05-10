@@ -74,6 +74,37 @@ export const patientsService = {
     return patient;
   },
 
+  async update(
+    patientId: string,
+    data: {
+      phone?: string;
+      email?: string;
+      dateOfBirth?: Date;
+      pathologies?: string[];
+    },
+  ): Promise<IPatientDocument> {
+    const patient = await PatientModel.findById(patientId);
+    if (!patient) {
+      throw new ApiError(404, "Patient not found");
+    }
+
+    if (data.phone !== undefined) patient.phone = data.phone.trim();
+    if (data.email !== undefined) patient.email = data.email.trim().toLowerCase();
+    if (data.dateOfBirth !== undefined) patient.dateOfBirth = data.dateOfBirth;
+    if (data.pathologies !== undefined) {
+      const existing = new Set(patient.pathologies.map((p) => p.toLowerCase()));
+      for (const p of data.pathologies) {
+        if (!existing.has(p.toLowerCase())) {
+          patient.pathologies.push(p);
+          existing.add(p.toLowerCase());
+        }
+      }
+    }
+
+    await patient.save();
+    return patient;
+  },
+
   async updateAssignments(patientId: string, staffIds: string[]): Promise<IPatientDocument> {
     const patient = await PatientModel.findById(patientId);
     if (!patient) {

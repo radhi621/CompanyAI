@@ -27,6 +27,28 @@ const sleep = async (ms: number): Promise<void> => {
   });
 };
 
+function extractRetryDelayMs(message: string): number | null {
+
+  // Gemini: parse retryDelay from the RetryInfo detail (e.g. "retryDelay":"14s")
+  const retryDelayMatch = message.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
+  if (retryDelayMatch?.[1]) {
+    return Math.ceil(parseFloat(retryDelayMatch[1]) * 1000);
+  }
+
+  // Groq: parse "try again in XmYs" or "try again in Xs"
+  const groqMinutesMatch = message.match(/try again in (\d+)m(\d+(?:\.\d+)?)s/);
+  if (groqMinutesMatch) {
+    return Math.ceil(parseInt(groqMinutesMatch[1]) * 60 * 1000 + parseFloat(groqMinutesMatch[2]) * 1000);
+  }
+
+  const groqSecondsMatch = message.match(/try again in (\d+(?:\.\d+)?)s/);
+  if (groqSecondsMatch?.[1]) {
+    return Math.ceil(parseFloat(groqSecondsMatch[1]) * 1000);
+  }
+
+  return null;
+}
+
 function normalizeProviderOrder(providerOrder?: LLMProvider[]): LLMProvider[] {
   if (!providerOrder || providerOrder.length === 0) {
     return ["gemini", "groq"];
@@ -60,11 +82,14 @@ export const llmRouter = {
             text,
           };
         } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
           errors.push({
             provider,
             attempt,
-            message: error instanceof Error ? error.message : String(error),
+            message: errorMsg,
           });
+
+          console.error(`[LLM Router] ${provider} attempt ${attempt}/${retriesPerProvider} failed: ${errorMsg}`);
 
           if (attempt < retriesPerProvider) {
             const delayMs = retryBaseDelayMs * 2 ** (attempt - 1);
@@ -74,8 +99,20 @@ export const llmRouter = {
       }
     }
 
-    throw new ApiError(502, "All LLM providers failed", {
+    // Check if any error was a rate limit and extract the wait time
+    const rateLimitDelays = errors
+      .map((e) => extractRetryDelayMs(e.message))
+      .filter((ms): ms is number => ms !== null);
+
+    const maxDelaySec = rateLimitDelays.length > 0 ? Math.ceil(Math.max(...rateLimitDelays) / 1000) : null;
+
+    const message = maxDelaySec
+      ? `All LLM providers are rate limited. Try again in ${maxDelaySec >= 60 ? `${Math.ceil(maxDelaySec / 60)} minute(s)` : `${maxDelaySec} second(s)`}.`
+      : "All LLM providers failed";
+
+    throw new ApiError(502, message, {
       errors,
+      retryAfterSeconds: maxDelaySec,
     });
   },
 };

@@ -14,10 +14,13 @@ export const AGENT_TOOL_NAMES = [
   "search_medical_records_RAG",
   "search_global_knowledge_RAG",
   "update_patient_notes",
+  "list_patient_notes",
+  "delete_patient_note",
   "get_day_schedule",
   "create_staff_account",
   "create_doctor_profile",
   "list_doctors",
+  "update_patient",
 ] as const;
 
 export type AgentToolName =
@@ -33,6 +36,9 @@ export type AgentToolName =
   | "search_medical_records_RAG"
   | "search_global_knowledge_RAG"
   | "update_patient_notes"
+  | "list_patient_notes"
+  | "delete_patient_note"
+  | "update_patient"
   | "get_day_schedule"
   | "create_staff_account"
   | "create_doctor_profile"

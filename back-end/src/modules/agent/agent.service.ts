@@ -257,6 +257,7 @@ function buildPlannerPrompt(actor: AuthUser, prompt: string, maxToolCalls: numbe
     `Limit planned tool calls to at most ${maxToolCalls}.`,
     "Return only a JSON object with this exact shape:",
     '{"thought":"optional","toolCalls":[{"tool":"...","args":{},"reason":"optional"}],"finalMessage":"optional"}',
+    "The finalMessage must be a thorough, detailed summary of what was done and the key results when tools are planned, or a comprehensive answer to the user's question when no tools are needed.",
     "Do not wrap JSON in markdown.",
     "Never use symbolic placeholders in args (for example: @search_patient.output.patientId, <PATIENT_ID>, <DOCTOR_ID>).",
     "If an ID is unknown, plan only the discovery call first (for example search_patient) and let the system continue.",
@@ -297,12 +298,38 @@ function buildNoToolFallbackPrompt(actor: AuthUser, prompt: string): string {
   return [
     "You are MediAssist IA.",
     `Requester role: ${actor.role}`,
-    "Provide a concise and safe response without performing any database-modifying action.",
+    "Provide a detailed, thorough, and safe response without performing any database-modifying action.",
     "If evidence is insufficient, clearly say what patient context is missing and ask for one clarifying detail.",
     "Do not imply that actions were executed.",
     "Respond in plain text only.",
     "User request:",
     prompt,
+  ].join("\n\n");
+}
+
+function buildSynthesisPrompt(actor: AuthUser, prompt: string, results: ExecutedToolResult[]): string {
+  const resultsJson = JSON.stringify(
+    results.map((r) => ({
+      tool: r.tool,
+      args: r.args,
+      result: r.result,
+    })),
+    null,
+    2,
+  );
+
+  return [
+    "You are MediAssist IA, a professional medical-office AI assistant generating the final response to the user.",
+    `Requester role: ${actor.role}`,
+    "Write a precise, concise summary focused only on the data returned. Present facts directly — no introductions, no conclusions, no fluff.",
+    "Do not explain what you did or how you searched. Just state the results.",
+    "If there are items (notes, appointments, patients), list them with their key fields in a compact format.",
+    "If nothing was found, say so in one sentence.",
+    "Original user request:",
+    prompt,
+    "Execution results:",
+    resultsJson,
+    "Your detailed response:",
   ].join("\n\n");
 }
 
@@ -992,6 +1019,20 @@ export const agentService = {
         success: true,
       });
 
+      let synthesizedSummary: string | null = null;
+      if (executionResults.length > 0) {
+        try {
+          const synthesisPrompt = buildSynthesisPrompt(input.actor, input.prompt, executionResults);
+          const synthesisResult = await llmRouter.generate(synthesisPrompt, {
+            retriesPerProvider: 1,
+            retryBaseDelayMs: env.LLM_RETRY_BASE_DELAY_MS,
+          });
+          synthesizedSummary = synthesisResult.text;
+        } catch {
+          // synthesis is best-effort; fall through to planner finalMessage
+        }
+      }
+
       const responsePayload = {
         provider: planner.provider,
         requiresConfirmation: false,
@@ -1000,7 +1041,8 @@ export const agentService = {
         autoChainedToolCalls,
         results: executionResults,
         finalMessage:
-          autoChainedToolCalls.length > 0
+          synthesizedSummary ??
+          (autoChainedToolCalls.length > 0
             ? "Tools executed successfully, including an automatic medical-record retrieval based on available patient context. Review tool results for details."
             : autoRecordSearchError
               ? `${
@@ -1008,7 +1050,7 @@ export const agentService = {
                   "Tools executed successfully. Review tool results for details."
                 } Automatic retrieval attempt failed: ${autoRecordSearchError}.`
             : planner.parsed.finalMessage ??
-              "Tools executed successfully. Review tool results for details.",
+              "Tools executed successfully. Review tool results for details."),
       };
 
       if (idempotencyRecordId) {
@@ -1025,7 +1067,7 @@ export const agentService = {
         actorId: new Types.ObjectId(input.actor.id),
         actorRole: input.actor.role,
         prompt: input.prompt,
-        plannerResponse: plannerRaw || "",
+        plannerResponse: plannerRaw || "planning_failed",
         toolResults: [],
         requiresConfirmation: false,
         success: false,
@@ -1121,11 +1163,25 @@ export const agentService = {
         success: true,
       });
 
+      let synthesizedSummary: string | null = null;
+      if (executionResults.length > 0) {
+        try {
+          const synthesisPrompt = buildSynthesisPrompt(input.actor, pending.prompt, executionResults);
+          const synthesisResult = await llmRouter.generate(synthesisPrompt, {
+            retriesPerProvider: 1,
+            retryBaseDelayMs: env.LLM_RETRY_BASE_DELAY_MS,
+          });
+          synthesizedSummary = synthesisResult.text;
+        } catch {
+          // synthesis is best-effort
+        }
+      }
+
       const responsePayload = {
         pendingActionId: pending._id.toString(),
         status: "executed",
         results: executionResults,
-        message: "Pending action confirmed and executed successfully.",
+        message: synthesizedSummary ?? "Pending action confirmed and executed successfully.",
       };
 
       if (idempotencyRecordId) {
