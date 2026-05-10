@@ -6,7 +6,12 @@ const gemini = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) {
-    return error.message;
+    const lines = [error.message];
+    const apiErr = error as { error?: Record<string, unknown> };
+    if (apiErr.error) {
+      lines.push(JSON.stringify(apiErr.error));
+    }
+    return lines.join(" | ");
   }
 
   return String(error);

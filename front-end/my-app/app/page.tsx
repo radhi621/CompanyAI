@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Calendar from "../components/Calendar";
 
 type UserRole = "admin" | "doctor" | "nurse" | "secretary";
 type PromptMode = "fetch" | "insert";
@@ -516,6 +517,19 @@ function UploadIcon(): ReactNode {
       <path d="M10 13V4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       <path d="M6.5 7.5L10 4l3.5 3.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M4 14.5h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CalendarIcon(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+      <rect x="3" y="4" width="14" height="13" rx="1.5" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M3 8h14" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M6.5 2v2M13.5 2v2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <circle cx="7" cy="11" r="0.8" fill="currentColor" />
+      <circle cx="10" cy="11" r="0.8" fill="currentColor" />
+      <circle cx="13" cy="11" r="0.8" fill="currentColor" />
     </svg>
   );
 }
@@ -1859,6 +1873,49 @@ export default function Home() {
                   + New Chat In Current Scope
                 </button>
 
+                {chatScope === "global" && (() => {
+                  const globalConv = conversations[GLOBAL_CONVERSATION_ID];
+                  const globalSessions = globalConv ? Object.values(globalConv.sessions) : [];
+                  return globalSessions.length > 1 ? (
+                    <div className="mt-2 rounded-lg border border-[#d9ceb9] bg-[#faf6ee] px-2 py-2">
+                      <details>
+                        <summary className="cursor-pointer text-[10px] text-[#7c6e55]">
+                          Global Sessions ({globalSessions.length})
+                        </summary>
+                        <div className="mt-1 space-y-1">
+                          {globalSessions.map((session) => (
+                            <div key={session.id} className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleSwitchSession(GLOBAL_CONVERSATION_ID, session.id)}
+                                className={`flex-1 rounded px-2 py-1 text-left text-[10px] ${
+                                  session.id === globalConv?.activeSessionId
+                                    ? "bg-[#e0d5c0] font-semibold text-[#2f2a21]"
+                                    : "text-[#6a5b43] hover:bg-[#efeadc]"
+                                }`}
+                              >
+                                {session.messages.length} msg{session.messages.length !== 1 ? "s" : ""}
+                                {session.messages.length > 0
+                                  ? ` | ${formatDateTime(session.messages[session.messages.length - 1].createdAt)}`
+                                  : " | empty"}
+                                {session.id === globalConv?.activeSessionId ? " (active)" : ""}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteSession(GLOBAL_CONVERSATION_ID, session.id)}
+                                className="rounded px-1 py-1 text-[10px] text-[#7f3f3f] hover:bg-[#fff1ef]"
+                                title="Delete session"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    </div>
+                  ) : null;
+                })()}
+
                 {chatScope === "patient" && (
                   <>
                     <div className="mt-3 rounded-lg border border-[#dacfbf] bg-[#fffdf7] p-2">
@@ -1994,6 +2051,16 @@ export default function Home() {
                   </>
                 )}
               </>
+            ),
+          })}
+
+          {DropdownSection({
+            title: "Calendar",
+            subtitle: "Manage appointments",
+            icon: CalendarIcon(),
+            defaultOpen: false,
+            children: (
+              <Calendar token={token} />
             ),
           })}
 
