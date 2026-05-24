@@ -21,6 +21,7 @@ export const agentController = {
       prompt: parsed.body.prompt,
       maxToolCalls: parsed.body.maxToolCalls,
       idempotencyKey,
+      history: parsed.body.history,
     });
 
     res.status(200).json({

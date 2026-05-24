@@ -462,7 +462,7 @@ const toolRegistry = {
   create_appointment: defineTool({
     description: "Creates an appointment from local date/time and reason",
     allowedRoles: ["admin", "doctor", "secretary"],
-    destructive: false,
+    destructive: true,
     argsShape: {
       patientId: "required MongoDB ObjectId",
       doctorId: "required MongoDB ObjectId",

@@ -50,11 +50,17 @@ const plannerResponseSchema = z
   })
   .strict();
 
+interface ConversationTurn {
+  role: "user" | "assistant" | "system";
+  text: string;
+}
+
 interface ExecutePromptInput {
   actor: AuthUser;
   prompt: string;
   maxToolCalls: number;
   idempotencyKey?: string;
+  history?: ConversationTurn[];
 }
 
 interface ConfirmPendingActionInput {
@@ -245,10 +251,23 @@ function parsePlannerResponse(raw: string): z.infer<typeof plannerResponseSchema
   throw new ApiError(502, "Planner did not return valid JSON following the required schema");
 }
 
-function buildPlannerPrompt(actor: AuthUser, prompt: string, maxToolCalls: number): string {
-  const toolCatalog = JSON.stringify(getToolCatalogForPrompt(), null, 2);
+function formatConversationHistory(history?: ConversationTurn[]): string {
+  if (!history || history.length === 0) return "";
+  const lines = history
+    .filter((h) => h.role !== "system")
+    .map((h) => {
+      const label = h.role === "user" ? "User" : "Assistant";
+      return `${label}: ${h.text}`;
+    });
+  if (lines.length === 0) return "";
+  return ["Previous conversation:", ...lines, "--- Current request ---"].join("\n\n");
+}
 
-  return [
+function buildPlannerPrompt(actor: AuthUser, prompt: string, maxToolCalls: number, history?: ConversationTurn[]): string {
+  const toolCatalog = JSON.stringify(getToolCatalogForPrompt(), null, 2);
+  const historyBlock = formatConversationHistory(history);
+
+  const parts = [
     "You are an orchestration planner for MediAssist IA.",
     `Requester role: ${actor.role}`,
     "Plan tool calls using only allowed tools for the request.",
@@ -263,9 +282,15 @@ function buildPlannerPrompt(actor: AuthUser, prompt: string, maxToolCalls: numbe
     "If an ID is unknown, plan only the discovery call first (for example search_patient) and let the system continue.",
     "Available tools:",
     toolCatalog,
-    "User request:",
-    prompt,
-  ].join("\n\n");
+  ];
+
+  if (historyBlock) {
+    parts.push(historyBlock);
+  }
+
+  parts.push("User request:", prompt);
+
+  return parts.join("\n\n");
 }
 
 function buildPlannerRepairPrompt(
@@ -274,10 +299,12 @@ function buildPlannerRepairPrompt(
   maxToolCalls: number,
   invalidOutput: string,
   parseErrorMessage: string,
+  history?: ConversationTurn[],
 ): string {
   const toolCatalog = JSON.stringify(getToolCatalogForPrompt(), null, 2);
+  const historyBlock = formatConversationHistory(history);
 
-  return [
+  const parts = [
     "You are repairing a malformed planner output.",
     `Requester role: ${actor.role}`,
     `Original request: ${prompt}`,
@@ -289,25 +316,39 @@ function buildPlannerRepairPrompt(
     `Previous parse issue: ${parseErrorMessage}`,
     "Allowed tool catalog:",
     toolCatalog,
-    "Invalid output to repair:",
-    invalidOutput,
-  ].join("\n\n");
+  ];
+
+  if (historyBlock) {
+    parts.push(historyBlock);
+  }
+
+  parts.push("Invalid output to repair:", invalidOutput);
+
+  return parts.join("\n\n");
 }
 
-function buildNoToolFallbackPrompt(actor: AuthUser, prompt: string): string {
-  return [
+function buildNoToolFallbackPrompt(actor: AuthUser, prompt: string, history?: ConversationTurn[]): string {
+  const historyBlock = formatConversationHistory(history);
+
+  const parts = [
     "You are MediAssist IA.",
     `Requester role: ${actor.role}`,
     "Provide a detailed, thorough, and safe response without performing any database-modifying action.",
     "If evidence is insufficient, clearly say what patient context is missing and ask for one clarifying detail.",
     "Do not imply that actions were executed.",
     "Respond in plain text only.",
-    "User request:",
-    prompt,
-  ].join("\n\n");
+  ];
+
+  if (historyBlock) {
+    parts.push(historyBlock);
+  }
+
+  parts.push("User request:", prompt);
+
+  return parts.join("\n\n");
 }
 
-function buildSynthesisPrompt(actor: AuthUser, prompt: string, results: ExecutedToolResult[]): string {
+function buildSynthesisPrompt(actor: AuthUser, prompt: string, results: ExecutedToolResult[], history?: ConversationTurn[]): string {
   const resultsJson = JSON.stringify(
     results.map((r) => ({
       tool: r.tool,
@@ -317,20 +358,24 @@ function buildSynthesisPrompt(actor: AuthUser, prompt: string, results: Executed
     null,
     2,
   );
+  const historyBlock = formatConversationHistory(history);
 
-  return [
+  const parts = [
     "You are MediAssist IA, a professional medical-office AI assistant generating the final response to the user.",
     `Requester role: ${actor.role}`,
     "Write a precise, concise summary focused only on the data returned. Present facts directly — no introductions, no conclusions, no fluff.",
     "Do not explain what you did or how you searched. Just state the results.",
     "If there are items (notes, appointments, patients), list them with their key fields in a compact format.",
     "If nothing was found, say so in one sentence.",
-    "Original user request:",
-    prompt,
-    "Execution results:",
-    resultsJson,
-    "Your detailed response:",
-  ].join("\n\n");
+  ];
+
+  if (historyBlock) {
+    parts.push(historyBlock);
+  }
+
+  parts.push("Original user request:", prompt, "Execution results:", resultsJson, "Your detailed response:");
+
+  return parts.join("\n\n");
 }
 
 function toToolCalls(
@@ -618,8 +663,9 @@ async function planToolCalls(
   actor: AuthUser,
   prompt: string,
   maxToolCalls: number,
+  history?: ConversationTurn[],
 ): Promise<PlannerOutcome> {
-  const plannerPrompt = buildPlannerPrompt(actor, prompt, maxToolCalls);
+  const plannerPrompt = buildPlannerPrompt(actor, prompt, maxToolCalls, history);
   const llmOptions = {
     retriesPerProvider: env.LLM_RETRIES_PER_PROVIDER,
     retryBaseDelayMs: env.LLM_RETRY_BASE_DELAY_MS,
@@ -648,6 +694,7 @@ async function planToolCalls(
       maxToolCalls,
       primaryPlanner.text,
       extractErrorMessage(primaryParseError),
+      history,
     );
     const repairedPlanner = await llmRouter.generate(repairPrompt, llmOptions);
 
@@ -666,7 +713,7 @@ async function planToolCalls(
         fallbackUsed: false,
       };
     } catch {
-      const fallback = await llmRouter.generate(buildNoToolFallbackPrompt(actor, prompt), llmOptions);
+      const fallback = await llmRouter.generate(buildNoToolFallbackPrompt(actor, prompt, history), llmOptions);
 
       return {
         provider: fallback.provider,
@@ -860,7 +907,7 @@ export const agentService = {
     }
 
     try {
-      const planner = await planToolCalls(input.actor, input.prompt, input.maxToolCalls);
+      const planner = await planToolCalls(input.actor, input.prompt, input.maxToolCalls, input.history);
       plannerRaw = planner.raw;
 
       const calls = normalizePlannedToolCalls(
@@ -943,7 +990,7 @@ export const agentService = {
           prompt: input.prompt,
           toolCalls: calls,
           status: "pending",
-          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          expiresAt: new Date(Date.now() + env.AGENT_IDEMPOTENCY_TTL_MINUTES * 60 * 1000),
         });
 
         await AgentAuditLogModel.create({
@@ -1022,7 +1069,7 @@ export const agentService = {
       let synthesizedSummary: string | null = null;
       if (executionResults.length > 0) {
         try {
-          const synthesisPrompt = buildSynthesisPrompt(input.actor, input.prompt, executionResults);
+          const synthesisPrompt = buildSynthesisPrompt(input.actor, input.prompt, executionResults, input.history);
           const synthesisResult = await llmRouter.generate(synthesisPrompt, {
             retriesPerProvider: 1,
             retryBaseDelayMs: env.LLM_RETRY_BASE_DELAY_MS,
@@ -1100,19 +1147,27 @@ export const agentService = {
     }
 
     try {
-      const pending = await AgentPendingActionModel.findOne({
-        _id: new Types.ObjectId(input.actionId),
-        status: "pending",
-        expiresAt: { $gt: new Date() },
-      });
+      const pendingActionObjectId = new Types.ObjectId(input.actionId);
 
-      if (!pending) {
-        throw new ApiError(404, "Pending action not found or expired");
+      const existing = await AgentPendingActionModel.findById(pendingActionObjectId);
+
+      if (!existing) {
+        throw new ApiError(404, `Pending action ${input.actionId} does not exist in the database`);
       }
 
-      if (pending.actorId.toString() !== input.actor.id) {
+      if (existing.actorId.toString() !== input.actor.id) {
         throw new ApiError(403, "Only the original requester can confirm this action");
       }
+
+      if (existing.status !== "pending") {
+        throw new ApiError(409, `Pending action is already ${existing.status}`);
+      }
+
+      if (existing.expiresAt.getTime() < Date.now()) {
+        throw new ApiError(410, "Pending action has expired");
+      }
+
+      const pending = existing;
 
       if (!input.approved) {
         pending.status = "rejected";
@@ -1142,14 +1197,16 @@ export const agentService = {
         return responsePayload;
       }
 
-      pending.status = "approved";
-      pending.approvedAt = new Date();
-      await pending.save();
-
-      const executionResults = await executeCalls(input.actor, pending.prompt, pending.toolCalls);
+      const plainCalls: IAgentToolCall[] = pending.toolCalls.map((c) => ({
+        tool: c.tool,
+        args: c.args as Record<string, unknown>,
+        reason: c.reason,
+      }));
+      const executionResults = await executeCalls(input.actor, pending.prompt, plainCalls);
 
       pending.status = "executed";
       pending.executedAt = new Date();
+      pending.approvedAt = new Date();
       await pending.save();
 
       await AgentAuditLogModel.create({

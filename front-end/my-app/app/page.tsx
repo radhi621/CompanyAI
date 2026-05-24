@@ -123,16 +123,86 @@ const QUICK_ACTIONS: Array<{ title: string; mode: PromptMode; prompt: string }> 
     prompt: "Find patient by CIN AB123456 and show basic profile.",
   },
   {
+    title: "Patient summary",
+    mode: "fetch",
+    prompt: "Get full summary for patient <PATIENT_ID>.",
+  },
+  {
+    title: "List appointments",
+    mode: "fetch",
+    prompt: "List all upcoming appointments with patient name, doctor, date, and status.",
+  },
+  {
+    title: "Check availability",
+    mode: "fetch",
+    prompt: "Check availability for doctor <DOCTOR_ID> on 2026-05-25.",
+  },
+  {
+    title: "List doctors",
+    mode: "fetch",
+    prompt: "List all doctors with specialty, license number, and active status.",
+  },
+  {
+    title: "Uncontacted patients",
+    mode: "fetch",
+    prompt: "List patients without recent contact in my department.",
+  },
+  {
+    title: "Patient notes",
+    mode: "fetch",
+    prompt: "List all notes for patient <PATIENT_ID>.",
+  },
+  {
+    title: "Search medical records",
+    mode: "fetch",
+    prompt: "Search medical records for patient <PATIENT_ID> with keyword <KEYWORD>.",
+  },
+  {
+    title: "Search global knowledge",
+    mode: "fetch",
+    prompt: "Search global medical knowledge about <TOPIC>.",
+  },
+  {
     title: "Create patient",
     mode: "insert",
     prompt:
       "Create a patient with first name Youssef, last name Amrani, CIN AB123456, phone +212600000000, email youssef.amrani@example.com, and pathologies hypertension and asthma.",
   },
   {
+    title: "Update patient",
+    mode: "insert",
+    prompt: "Update patient <PATIENT_ID> with new phone +212600000001.",
+  },
+  {
     title: "Create appointment",
     mode: "insert",
     prompt:
       "Create an appointment for patient <PATIENT_ID> with doctor <DOCTOR_ID> on 2026-04-20 at 10:00 for post-op follow up, 60 minutes.",
+  },
+  {
+    title: "Cancel appointment",
+    mode: "insert",
+    prompt: "Cancel appointment <APPOINTMENT_ID> due to patient rescheduling.",
+  },
+  {
+    title: "Add patient note",
+    mode: "insert",
+    prompt: "Add a note for patient <PATIENT_ID>: <NOTE_TEXT>.",
+  },
+  {
+    title: "Delete patient note",
+    mode: "insert",
+    prompt: "Delete patient note <NOTE_ID>.",
+  },
+  {
+    title: "Create staff account",
+    mode: "insert",
+    prompt: "Create a staff account for <NAME>, email <EMAIL>, password <PASSWORD>, role <ROLE>.",
+  },
+  {
+    title: "Create doctor profile",
+    mode: "insert",
+    prompt: "Create a doctor profile for <NAME>, specialty <SPECIALTY>, license number <LICENSE>.",
   },
 ];
 
@@ -636,6 +706,63 @@ function quickActionIcon(title: string): ReactNode {
         <circle cx="13.1" cy="8" r="1.9" stroke="currentColor" strokeWidth="1.5" />
         <path d="M3.9 14.8c.9-1.6 2.1-2.4 3.3-2.4 1.2 0 2.4.8 3.2 2.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
         <path d="M11 14.8c.5-1 1.3-1.5 2.3-1.5s1.8.5 2.4 1.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (title.toLowerCase().includes("note")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+        <path d="M5 4h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M6.5 8.5h7M6.5 11h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (title.toLowerCase().includes("availability") || title.toLowerCase().includes("schedule")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+        <circle cx="10" cy="10" r="6.5" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M10 6.5V10l2.5 1.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (title.toLowerCase().includes("doctor")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+        <circle cx="10" cy="6" r="2.5" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M5 15.5c1-2 2.5-3 5-3s4 1 5 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <path d="M14 2.5l2 2-2 2M16 4.5h-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (title.toLowerCase().includes("search")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+        <circle cx="8.6" cy="8.6" r="4" stroke="currentColor" strokeWidth="1.6" />
+        <path d="m11.6 11.6 4.1 4.1" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        <path d="M10 5.5l3 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (title.toLowerCase().includes("summary")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+        <path d="M4 4h12a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M7 8h6M7 10.5h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (title.toLowerCase().includes("staff") || title.toLowerCase().includes("account")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+        <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M3.5 15c1.2-2 2.8-3 4.5-3s3.3 1 4.5 3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        <path d="M14 6v5M11.5 8.5h5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
       </svg>
     );
   }
@@ -1516,11 +1643,17 @@ export default function Home() {
         folder: activeFolder ?? undefined,
       });
 
+      const conversation = ensureConversation(conversations, activeConversationKey);
+      const history = conversation.messages
+        .slice(0, -1)
+        .map((msg: ChatMessage) => ({ role: msg.role, text: msg.text }));
+
       const result = await apiRequest<AgentExecutionResult>("/agent/execute", {
         method: "POST",
         body: JSON.stringify({
           prompt: payloadPrompt,
           maxToolCalls,
+          history,
         }),
         idempotencyKey: createId("agent-execute"),
       });

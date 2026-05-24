@@ -26,7 +26,7 @@ export const uploadAIRecordSchema = z.object({
   body: z.object({
     patientId: objectIdSchema,
     title: optionalTrimmedString(1, 120),
-    prompt: optionalTrimmedString(5, 8000),
+    prompt: optionalTrimmedString(1, 8000),
     mode: modeSchema.default("non_rag"),
   }),
 });
