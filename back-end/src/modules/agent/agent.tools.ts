@@ -14,7 +14,6 @@ import { PatientNoteModel } from "../../models/PatientNote";
 import { UserModel } from "../../models/User";
 import type { AuthUser, UserRole } from "../../types/auth";
 import { ApiError } from "../../utils/apiError";
-import { createUser as createUserAccount } from "../auth/auth.service";
 import { appointmentsService } from "../appointments/appointments.service";
 import { doctorsService } from "../doctors/doctors.service";
 import { patientsService } from "../patients/patients.service";
@@ -48,7 +47,6 @@ function defineTool<TSchema extends z.ZodTypeAny>(
 }
 
 const objectIdSchema = z.string().regex(/^[a-fA-F0-9]{24}$/, "Invalid MongoDB ObjectId");
-const userRoleSchema = z.enum(["admin", "doctor", "nurse", "secretary"]);
 const optionalBooleanSchema = z.preprocess((value) => {
   if (typeof value === "string") {
     const lowered = value.trim().toLowerCase();
@@ -223,12 +221,16 @@ const toolRegistry = {
       pathologies: z.array(z.string().min(2).max(100)).optional(),
     }),
     run: async (args, context) => {
-      const patient = await patientsService.update(args.patientId, {
-        phone: args.phone?.trim(),
-        email: args.email?.trim().toLowerCase(),
-        dateOfBirth: args.dateOfBirth,
-        pathologies: args.pathologies,
-      });
+      const patient = await patientsService.update(
+        args.patientId,
+        {
+          phone: args.phone?.trim(),
+          email: args.email?.trim().toLowerCase(),
+          dateOfBirth: args.dateOfBirth,
+          pathologies: args.pathologies,
+        },
+        context.actor,
+      );
 
       return {
         patientId: patient._id.toString(),
@@ -729,7 +731,7 @@ const toolRegistry = {
       query: z.string().min(3).max(2000),
       limit: z.coerce.number().int().positive().max(10).default(5),
     }),
-    run: async (args) => {
+    run: async (args, context) => {
       const chunks = await ragService.retrieveGlobalContext(args.query, args.limit);
 
       if (chunks.length > 0) {
@@ -750,9 +752,26 @@ const toolRegistry = {
         };
       }
 
-      const records = await AIRecordModel.find({
+      // The fallback reads patient AI records, so it must respect patient assignments.
+      const recordQuery: Record<string, unknown> = {
         deletedAt: { $exists: false },
-      })
+      };
+
+      const accessiblePatientIds = await getAccessiblePatientIds(context.actor);
+      if (accessiblePatientIds) {
+        if (accessiblePatientIds.length === 0) {
+          return {
+            query: args.query,
+            matches: [],
+            scope: "global",
+            fallbackUsed: "mongo_ai_records",
+          };
+        }
+
+        recordQuery.patientId = { $in: accessiblePatientIds };
+      }
+
+      const records = await AIRecordModel.find(recordQuery)
         .sort({ createdAt: -1 })
         .limit(100)
         .select("_id mode provider response contextChunks createdAt");
@@ -975,40 +994,6 @@ const toolRegistry = {
         date: args.date,
         timezone: env.APP_TIMEZONE,
         appointments,
-      };
-    },
-  }),
-
-  create_staff_account: defineTool({
-    description: "Creates a staff login account (admin-only)",
-    allowedRoles: ["admin"],
-    destructive: false,
-    argsShape: {
-      name: "required string",
-      email: "required email",
-      password: "required string min 8",
-      role: "required role: admin|doctor|nurse|secretary",
-    },
-    argsSchema: z.object({
-      name: z.string().min(2),
-      email: z.string().email(),
-      password: z.string().min(8),
-      role: userRoleSchema,
-    }),
-    run: async (args) => {
-      const user = await createUserAccount({
-        name: args.name.trim(),
-        email: args.email.trim().toLowerCase(),
-        password: args.password,
-        role: args.role,
-      });
-
-      return {
-        userId: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        isActive: user.isActive,
       };
     },
   }),
