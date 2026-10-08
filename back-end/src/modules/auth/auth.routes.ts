@@ -10,6 +10,7 @@ import { authController } from "./auth.controller";
 
 export const authRoutes = Router();
 
+authRoutes.get("/setup-status", authController.setupStatus);
 authRoutes.post("/bootstrap-admin", bootstrapAdminRateLimit, authController.bootstrapAdmin);
 authRoutes.post("/login", loginRateLimit, authController.login);
 authRoutes.post("/refresh", refreshRateLimit, authController.refresh);

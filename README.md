@@ -123,8 +123,8 @@ Gemini, Groq and Qdrant are stubbed, and the test environment uses dummy keys, s
 
 1. Make sure MongoDB, Qdrant, and the backend are running.
 2. Open the frontend in your browser.
-3. Bootstrap the first admin account using the backend bootstrap admin flow.
-4. Log in with a staff account.
+3. On a fresh install (no admin yet) the app shows a one-time **Set up MediAssist** screen: enter the setup key (`BOOTSTRAP_ADMIN_KEY` from `back-end/.env`) and the first admin's details. You are signed in straight away, and the screen never appears again.
+4. After that, everyone uses the normal **Sign in** screen. Admins create the other staff accounts from **Staff Accounts** in the sidebar.
 5. Use the frontend console to manage patients, doctors, appointments, and AI-assisted records.
 6. Use the agent tools for natural-language workflows when you need the assistant to carry out supported actions.
 

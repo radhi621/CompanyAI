@@ -23,6 +23,13 @@ export const openApiDocument = {
   },
   security: [{ bearerAuth: [] }],
   paths: {
+    "/auth/setup-status": {
+      get: {
+        tags: ["Auth"],
+        summary: "Public: whether the first admin still needs to be created (first-run setup)",
+        security: [],
+      },
+    },
     "/auth/login": {
       post: {
         tags: ["Auth"],

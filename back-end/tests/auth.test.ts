@@ -6,11 +6,17 @@ import { API, PASSWORD, api, auth, createSession, login, refreshCookieFrom } fro
 const refresh = (cookie: string) => api().post(`${API}/auth/refresh`).set("Cookie", cookie).send({});
 
 describe("bootstrap and login", () => {
-  it("bootstraps the first admin once and rejects a wrong key", async () => {
+  it("reports setup as needed until the first admin exists, and bootstraps only once", async () => {
     const body = { name: "Boot Admin", email: "boot@test.io", password: PASSWORD };
+    const setupStatus = async () => (await api().get(`${API}/auth/setup-status`)).body.data.needsSetup;
 
+    expect(await setupStatus()).toBe(true);
     expect((await api().post(`${API}/auth/bootstrap-admin`).send({ ...body, bootstrapKey: "wrong-key" })).status).toBe(403);
+    expect(await setupStatus()).toBe(true);
+
     expect((await api().post(`${API}/auth/bootstrap-admin`).send({ ...body, bootstrapKey: "test-bootstrap-key" })).status).toBe(201);
+    expect(await setupStatus()).toBe(false);
+
     const again = await api()
       .post(`${API}/auth/bootstrap-admin`)
       .send({ ...body, email: "boot2@test.io", bootstrapKey: "test-bootstrap-key" });

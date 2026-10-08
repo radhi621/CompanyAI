@@ -7,6 +7,7 @@ import {
   changeOwnPassword,
   createUser,
   getCurrentUser,
+  getSetupStatus,
   login,
   logout,
   rotateRefreshToken,
@@ -31,6 +32,13 @@ const refreshCookieOptions = {
 };
 
 export const authController = {
+  setupStatus: asyncHandler(async (_req: Request, res: Response) => {
+    res.status(200).json({
+      message: "Setup status",
+      data: await getSetupStatus(),
+    });
+  }),
+
   bootstrapAdmin: asyncHandler(async (req: Request, res: Response) => {
     const parsed = bootstrapAdminSchema.parse({ body: req.body });
     const user = await bootstrapAdmin(parsed.body);

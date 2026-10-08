@@ -92,9 +92,18 @@ async function issueTokens(user: IUserDocument, userAgent?: string, ipAddress?: 
   };
 }
 
+/**
+ * Whether the one-time setup (creating the first admin) still has to be done. Only
+ * reveals that no admin exists yet, which the setup screen needs to know.
+ */
+export const getSetupStatus = async (): Promise<{ needsSetup: boolean }> => {
+  const adminExists = await UserModel.exists({ role: "admin" });
+  return { needsSetup: !adminExists };
+};
+
 export const bootstrapAdmin = async (input: BootstrapAdminInput): Promise<AuthUser & { isActive: boolean }> => {
   if (input.bootstrapKey !== env.BOOTSTRAP_ADMIN_KEY) {
-    throw new ApiError(403, "Invalid bootstrap key");
+    throw new ApiError(403, "Invalid setup key");
   }
 
   const existingAdmin = await UserModel.exists({ role: "admin" });
