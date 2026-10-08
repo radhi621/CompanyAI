@@ -3,6 +3,7 @@ import { Types } from "mongoose";
 import { env } from "../../config/env";
 import { AppointmentModel } from "../../models/Appointment";
 import { DoctorModel, type IDoctorDocument } from "../../models/Doctor";
+import { UserModel } from "../../models/User";
 import {
   DoctorScheduleModel,
   type IDoctorScheduleDocument,
@@ -117,6 +118,12 @@ function isBlockedByExceptions(
   return unavailableBlocks.some((block) => overlapExists(slotStart, slotEnd, block.startAt, block.endAt));
 }
 
+/** The timezone a doctor's schedule is expressed in (falls back to the clinic timezone). */
+export async function getDoctorTimezone(doctorId: string): Promise<string> {
+  const schedule = await DoctorScheduleModel.findOne({ doctorId: new Types.ObjectId(doctorId) }).select("timezone");
+  return schedule?.timezone || env.APP_TIMEZONE;
+}
+
 /**
  * Rejects an appointment that falls outside the doctor's weekly availability or overlaps
  * one of their unavailable blocks. Doctors without a configured schedule are not restricted.
@@ -159,6 +166,23 @@ export async function assertWithinDoctorSchedule(doctorId: string, startAt: Date
 
 export const doctorsService = {
   async create(input: CreateDoctorInput): Promise<IDoctorDocument> {
+    // A profile can only be linked to an active doctor account that has no profile yet.
+    if (input.userId) {
+      const user = await UserModel.findById(input.userId).select("role isActive");
+      if (!user) {
+        throw new ApiError(404, "Linked user account not found");
+      }
+      if (user.role !== "doctor") {
+        throw new ApiError(400, "Linked user must have the doctor role");
+      }
+      if (!user.isActive) {
+        throw new ApiError(400, "Linked user account is deactivated");
+      }
+      if (await DoctorModel.exists({ userId: user._id })) {
+        throw new ApiError(409, "This doctor account is already linked to a doctor profile");
+      }
+    }
+
     const doctor = await DoctorModel.create({
       userId: input.userId ? new Types.ObjectId(input.userId) : undefined,
       fullName: input.fullName,

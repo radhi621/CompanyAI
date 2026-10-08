@@ -864,13 +864,10 @@ function getConversationKey(scope: ChatScope, activeFolderId: string | null): st
 }
 
 export default function Home() {
-  const [token, setToken] = useState<string | null>(() => {
-    if (typeof window === "undefined") {
-      return null;
-    }
-
-    return window.localStorage.getItem(TOKEN_STORAGE_KEY);
-  });
+  // The access token lives in memory only, so injected scripts cannot read it from storage.
+  // After a reload the session is restored through the httpOnly refresh cookie instead.
+  const [token, setToken] = useState<string | null>(null);
+  const [sessionRestoreDone, setSessionRestoreDone] = useState(false);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -1287,18 +1284,25 @@ export default function Home() {
     }
   }, [apiRequest, claimWorkspace, clearSession, token]);
 
+  // On first load, try to resume the session from the refresh cookie before showing sign-in.
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    if (!token) {
+    let cancelled = false;
+    const timerId = window.setTimeout(() => {
+      // Tokens saved by older versions of the app should not linger in storage.
       window.localStorage.removeItem(TOKEN_STORAGE_KEY);
-      return;
-    }
 
-    window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
-  }, [token]);
+      void refreshAccessToken().finally(() => {
+        if (!cancelled) {
+          setSessionRestoreDone(true);
+        }
+      });
+    }, 0);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
+  }, [refreshAccessToken]);
 
   useEffect(() => {
     if (!token || typeof window === "undefined") {
@@ -1362,7 +1366,7 @@ export default function Home() {
 
   // Ask the backend whether this is a fresh install, to show either first-run setup or sign-in.
   useEffect(() => {
-    if (token) {
+    if (token || !sessionRestoreDone) {
       return;
     }
 
@@ -1388,7 +1392,7 @@ export default function Home() {
       cancelled = true;
       window.clearTimeout(timerId);
     };
-  }, [token]);
+  }, [sessionRestoreDone, token]);
 
   const handleBootstrapAdmin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

@@ -147,27 +147,32 @@ function resolveTimeRange(input: ResolveTimeRangeInput): {
   };
 }
 
-async function assertNoConflict(
-  doctorId: string,
-  startAt: Date,
-  endAt: Date,
-  excludeAppointmentId?: string,
-): Promise<void> {
-  const conflict = await AppointmentModel.findOne({
-    doctorId: new Types.ObjectId(doctorId),
+// Neither the doctor nor the patient can be in two active appointments at once.
+async function assertNoConflict(input: {
+  doctorId: string;
+  patientId: string;
+  startAt: Date;
+  endAt: Date;
+  excludeAppointmentId?: string;
+}): Promise<void> {
+  const overlapping = {
     deletedAt: { $exists: false },
-    status: { $nin: ["cancelled"] },
-    ...(excludeAppointmentId
+    status: { $nin: ["cancelled"] as AppointmentStatus[] },
+    ...(input.excludeAppointmentId
       ? {
-          _id: { $ne: new Types.ObjectId(excludeAppointmentId) },
+          _id: { $ne: new Types.ObjectId(input.excludeAppointmentId) },
         }
       : {}),
-    startAt: { $lt: endAt },
-    endAt: { $gt: startAt },
-  }).select("_id startAt endAt");
+    startAt: { $lt: input.endAt },
+    endAt: { $gt: input.startAt },
+  };
 
-  if (conflict) {
+  if (await AppointmentModel.exists({ ...overlapping, doctorId: new Types.ObjectId(input.doctorId) })) {
     throw new ApiError(409, "This doctor already has an overlapping appointment in that time range");
+  }
+
+  if (await AppointmentModel.exists({ ...overlapping, patientId: new Types.ObjectId(input.patientId) })) {
+    throw new ApiError(409, "This patient already has an overlapping appointment in that time range");
   }
 }
 
@@ -217,7 +222,12 @@ export const appointmentsService = {
     if (!shouldBypassSchedule(input.actor, input.allowOutsideSchedule)) {
       await assertWithinDoctorSchedule(input.doctorId, timing.startAt, timing.endAt);
     }
-    await assertNoConflict(input.doctorId, timing.startAt, timing.endAt);
+    await assertNoConflict({
+      doctorId: input.doctorId,
+      patientId: input.patientId,
+      startAt: timing.startAt,
+      endAt: timing.endAt,
+    });
 
     return AppointmentModel.create({
       patientId: new Types.ObjectId(input.patientId),
@@ -339,12 +349,13 @@ export const appointmentsService = {
     }
 
     if (nextStatus !== "cancelled" && (timingChanged || reactivating)) {
-      await assertNoConflict(
-        appointment.doctorId.toString(),
-        appointment.startAt,
-        appointment.endAt,
-        appointment._id.toString(),
-      );
+      await assertNoConflict({
+        doctorId: appointment.doctorId.toString(),
+        patientId: appointment.patientId.toString(),
+        startAt: appointment.startAt,
+        endAt: appointment.endAt,
+        excludeAppointmentId: appointment._id.toString(),
+      });
     }
 
     if (input.reason !== undefined) {
@@ -389,12 +400,13 @@ export const appointmentsService = {
     }
 
     if (appointment.status !== "cancelled") {
-      await assertNoConflict(
-        appointment.doctorId.toString(),
-        appointment.startAt,
-        appointment.endAt,
-        appointment._id.toString(),
-      );
+      await assertNoConflict({
+        doctorId: appointment.doctorId.toString(),
+        patientId: appointment.patientId.toString(),
+        startAt: appointment.startAt,
+        endAt: appointment.endAt,
+        excludeAppointmentId: appointment._id.toString(),
+      });
     }
 
     appointment.deletedAt = undefined;
