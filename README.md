@@ -105,6 +105,19 @@ Open the frontend at `http://localhost:3000` and the backend API at `http://loca
 - `npm run start` - run the compiled server
 - `npm run typecheck` - run TypeScript validation
 - `npm test` - run the backend test suite (`npm run test:watch` to re-run on changes)
+- `npm run seed:demo` - add demo data for local development (`npm run seed:demo -- --remove` to delete it)
+
+### Demo data
+
+`npm run seed:demo` (in `back-end/`) adds a ready-to-use clinic to the database in `MONGODB_URI`:
+
+- demo staff accounts for every role, all with the password `DemoPass123`:
+  `admin@demo.mediassist.local`, `dr.amrani@demo.mediassist.local`, `nurse.bennani@demo.mediassist.local`, `secretary.alaoui@demo.mediassist.local`
+- two doctors with weekly schedules (general medicine Mon–Fri 09:00–17:00, cardiology Tue/Thu 10:00–16:00)
+- five patients with pathologies and notes, assigned to the demo doctor, nurse and secretary
+- upcoming appointments within working hours, plus two completed past visits
+
+Everything it creates is marked (demo email domain, `DEMO` CINs, `DEMO-` licence numbers), so it never touches your own data, running it twice does nothing, and `npm run seed:demo -- --remove` deletes exactly what it added. It refuses to run with `NODE_ENV=production`. Never reuse the demo password outside local development.
 
 ### Backend tests
 
