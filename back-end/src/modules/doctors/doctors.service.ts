@@ -117,6 +117,46 @@ function isBlockedByExceptions(
   return unavailableBlocks.some((block) => overlapExists(slotStart, slotEnd, block.startAt, block.endAt));
 }
 
+/**
+ * Rejects an appointment that falls outside the doctor's weekly availability or overlaps
+ * one of their unavailable blocks. Doctors without a configured schedule are not restricted.
+ */
+export async function assertWithinDoctorSchedule(doctorId: string, startAt: Date, endAt: Date): Promise<void> {
+  const schedule = await DoctorScheduleModel.findOne({ doctorId: new Types.ObjectId(doctorId) });
+  if (!schedule || schedule.weeklyAvailability.length === 0) {
+    return;
+  }
+
+  const tz = schedule.timezone || env.APP_TIMEZONE;
+  const localStart = DateTime.fromJSDate(startAt, { zone: tz });
+  const localEnd = DateTime.fromJSDate(endAt, { zone: tz });
+  const dayOfWeek = localStart.weekday % 7;
+
+  const fitsWindow = schedule.weeklyAvailability.some((window) => {
+    if (window.dayOfWeek !== dayOfWeek) {
+      return false;
+    }
+
+    const start = parseTime(window.startTime);
+    const end = parseTime(window.endTime);
+    const windowStart = localStart.set({ hour: start.hour, minute: start.minute, second: 0, millisecond: 0 });
+    const windowEnd = localStart.set({ hour: end.hour, minute: end.minute, second: 0, millisecond: 0 });
+    return localStart >= windowStart && localEnd <= windowEnd;
+  });
+
+  if (!fitsWindow) {
+    throw new ApiError(400, "Appointment is outside the doctor's working hours", {
+      timezone: tz,
+      requestedStartLocal: localStart.toISO(),
+      requestedEndLocal: localEnd.toISO(),
+    });
+  }
+
+  if (isBlockedByExceptions(schedule.unavailableBlocks, startAt, endAt)) {
+    throw new ApiError(400, "The doctor is unavailable during this time");
+  }
+}
+
 export const doctorsService = {
   async create(input: CreateDoctorInput): Promise<IDoctorDocument> {
     const doctor = await DoctorModel.create({
@@ -218,6 +258,7 @@ export const doctorsService = {
     const fromUtc = fromLocal.toUTC().toJSDate();
     const endUtc = endLocal.toUTC().toJSDate();
 
+    const now = new Date();
     const bookedAppointments = await AppointmentModel.find({
       doctorId: doctor._id,
       deletedAt: { $exists: false },
@@ -255,6 +296,12 @@ export const doctorsService = {
           const slotEnd = cursor.plus({ minutes: input.estimatedDurationMinutes });
           const slotStartDate = slotStart.toUTC().toJSDate();
           const slotEndDate = slotEnd.toUTC().toJSDate();
+
+          // Never offer a slot that has already started.
+          if (slotStartDate < now) {
+            cursor = cursor.plus({ minutes: schedule.slotStepMinutes });
+            continue;
+          }
 
           const blockedByException = isBlockedByExceptions(
             schedule.unavailableBlocks,
