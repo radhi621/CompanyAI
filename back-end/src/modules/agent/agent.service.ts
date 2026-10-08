@@ -14,6 +14,7 @@ import { llmRouter } from "../../services/llm/llmRouter";
 import { acquireIdempotency, completeIdempotency, failIdempotency } from "./agent.idempotency";
 import {
   executeToolCall,
+  getToolArgsIssue,
   getToolCatalogForPrompt,
   isToolAllowedForRole,
   isToolDestructive,
@@ -733,8 +734,14 @@ async function executeCalls(
   actor: AuthUser,
   prompt: string,
   calls: IAgentToolCall[],
+  options: {
+    // Fill a missing/invalid patientId from earlier results in the batch. Disabled for
+    // confirmed actions, which must run exactly the arguments the user approved.
+    resolveMissingPatientIds?: boolean;
+  } = {},
 ): Promise<ExecutedToolResult[]> {
   const results: ExecutedToolResult[] = [];
+  const resolveMissingPatientIds = options.resolveMissingPatientIds ?? true;
 
   const resolvePatientIdFromExecutedResults = (): string | null =>
     resolvePatientIdFromExecutionResults(results);
@@ -742,7 +749,9 @@ async function executeCalls(
   for (const call of calls) {
     let effectiveCall = call;
 
-    if (call.tool === "search_medical_records_RAG") {
+    if (!resolveMissingPatientIds) {
+      // Run the approved call as-is.
+    } else if (call.tool === "search_medical_records_RAG") {
       const resolvedPatientId = normalizePatientId(call.args?.patientId) ?? resolvePatientIdFromExecutedResults();
       if (resolvedPatientId) {
         effectiveCall = {
@@ -984,6 +993,21 @@ export const agentService = {
 
       const hasDestructiveTool = calls.some((call) => isToolDestructive(call.tool));
       if (hasDestructiveTool) {
+        // Confirmed actions run with exactly these arguments, so every ID must already be
+        // concrete. Never ask the user to approve an action that depends on values (such
+        // as a patient) that would only be filled in after approval.
+        for (const call of calls) {
+          const issue = getToolArgsIssue(call);
+          if (issue) {
+            throw new ApiError(
+              400,
+              `The planned ${call.tool} action is missing concrete details (${issue}). ` +
+                "Look up the patient, doctor or record first, then ask again with its ID.",
+              { tool: call.tool, args: call.args },
+            );
+          }
+        }
+
         const pending = await AgentPendingActionModel.create({
           actorId: new Types.ObjectId(input.actor.id),
           actorRole: input.actor.role,
@@ -1212,7 +1236,9 @@ export const agentService = {
       }));
       let executionResults: ExecutedToolResult[];
       try {
-        executionResults = await executeCalls(input.actor, pending.prompt, plainCalls);
+        executionResults = await executeCalls(input.actor, pending.prompt, plainCalls, {
+          resolveMissingPatientIds: false,
+        });
       } catch (error) {
         // Some calls may already have run, so never return the action to "pending".
         pending.status = "failed";

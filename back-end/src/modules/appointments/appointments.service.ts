@@ -27,6 +27,7 @@ interface CreateAppointmentInput {
   status?: AppointmentStatus;
   source?: "manual" | "ai";
   notes?: string;
+  allowOutsideSchedule?: boolean;
 }
 
 interface ListAppointmentsInput {
@@ -49,6 +50,7 @@ interface UpdateAppointmentInput {
   reason?: string;
   status?: AppointmentStatus;
   notes?: string;
+  allowOutsideSchedule?: boolean;
 }
 
 interface ResolveTimeRangeInput {
@@ -178,6 +180,19 @@ function assertNotInPast(startAt: Date): void {
   }
 }
 
+// Admins may book outside a doctor's working hours (e.g. emergencies); nobody else can.
+function shouldBypassSchedule(actor: AuthUser, allowOutsideSchedule?: boolean): boolean {
+  if (!allowOutsideSchedule) {
+    return false;
+  }
+
+  if (actor.role !== "admin") {
+    throw new ApiError(403, "Only admins can book outside a doctor's working hours");
+  }
+
+  return true;
+}
+
 async function getAppointmentOrThrow(appointmentId: string): Promise<IAppointmentDocument> {
   const appointment = await AppointmentModel.findById(appointmentId);
   if (!appointment || appointment.deletedAt) {
@@ -199,7 +214,9 @@ export const appointmentsService = {
     });
 
     assertNotInPast(timing.startAt);
-    await assertWithinDoctorSchedule(input.doctorId, timing.startAt, timing.endAt);
+    if (!shouldBypassSchedule(input.actor, input.allowOutsideSchedule)) {
+      await assertWithinDoctorSchedule(input.doctorId, timing.startAt, timing.endAt);
+    }
     await assertNoConflict(input.doctorId, timing.startAt, timing.endAt);
 
     return AppointmentModel.create({
@@ -312,7 +329,9 @@ export const appointmentsService = {
       });
 
       assertNotInPast(timing.startAt);
-      await assertWithinDoctorSchedule(appointment.doctorId.toString(), timing.startAt, timing.endAt);
+      if (!shouldBypassSchedule(input.actor, input.allowOutsideSchedule)) {
+        await assertWithinDoctorSchedule(appointment.doctorId.toString(), timing.startAt, timing.endAt);
+      }
 
       appointment.startAt = timing.startAt;
       appointment.endAt = timing.endAt;
