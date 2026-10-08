@@ -213,6 +213,50 @@ export const logout = async (refreshToken: string): Promise<void> => {
   await tokenDoc.save();
 };
 
+/**
+ * Revokes all of a user's active refresh tokens, optionally keeping one (the caller's
+ * current session). Used when an account is deactivated or its password changes.
+ */
+export const revokeUserRefreshTokens = async (userId: string, exceptRefreshToken?: string): Promise<void> => {
+  const filter: Record<string, unknown> = {
+    userId: new Types.ObjectId(userId),
+    revokedAt: { $exists: false },
+  };
+
+  if (exceptRefreshToken) {
+    filter.tokenHash = { $ne: hashRefreshToken(exceptRefreshToken) };
+  }
+
+  await RefreshTokenModel.updateMany(filter, { $set: { revokedAt: new Date() } });
+};
+
+export const changeOwnPassword = async (input: {
+  userId: string;
+  currentPassword: string;
+  newPassword: string;
+  currentRefreshToken?: string;
+}): Promise<void> => {
+  const user = await UserModel.findById(input.userId).select("+password");
+  if (!user || !user.isActive) {
+    throw new ApiError(404, "User not found");
+  }
+
+  const matches = await user.comparePassword(input.currentPassword);
+  if (!matches) {
+    throw new ApiError(400, "Current password is incorrect");
+  }
+
+  if (input.currentPassword === input.newPassword) {
+    throw new ApiError(400, "New password must be different from the current password");
+  }
+
+  user.password = input.newPassword;
+  await user.save();
+
+  // Sign out every other session; the session making this request stays signed in.
+  await revokeUserRefreshTokens(input.userId, input.currentRefreshToken);
+};
+
 export const getCurrentUser = async (userId: string): Promise<AuthUser & { isActive: boolean }> => {
   const user = await UserModel.findById(userId);
   if (!user) {

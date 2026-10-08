@@ -41,6 +41,56 @@ export const openApiDocument = {
         summary: "Get current authenticated user",
       },
     },
+    "/auth/me/password": {
+      post: {
+        tags: ["Auth"],
+        summary: "Change your own password (signs out your other sessions)",
+      },
+    },
+    "/auth/users": {
+      post: {
+        tags: ["Users"],
+        summary: "Create a staff account (admin only)",
+      },
+    },
+    "/users": {
+      get: {
+        tags: ["Users"],
+        summary: "List staff accounts with role, active and search filters (admin only)",
+      },
+    },
+    "/users/{userId}": {
+      patch: {
+        tags: ["Users"],
+        summary: "Update a staff account's name, role or active status (admin only)",
+      },
+    },
+    "/users/{userId}/reset-password": {
+      post: {
+        tags: ["Users"],
+        summary: "Set a new password for a staff account and sign it out everywhere (admin only)",
+      },
+    },
+    "/patients/{patientId}/notes": {
+      get: {
+        tags: ["Patient Notes"],
+        summary: "List a patient's notes, newest first",
+      },
+      post: {
+        tags: ["Patient Notes"],
+        summary: "Add a note to a patient",
+      },
+    },
+    "/patients/{patientId}/notes/{noteId}": {
+      patch: {
+        tags: ["Patient Notes"],
+        summary: "Edit a note (author or admin)",
+      },
+      delete: {
+        tags: ["Patient Notes"],
+        summary: "Soft-delete a note (author or admin)",
+      },
+    },
     "/patients": {
       get: {
         tags: ["Patients"],
@@ -55,6 +105,10 @@ export const openApiDocument = {
       get: {
         tags: ["Patients"],
         summary: "Get patient by ID",
+      },
+      patch: {
+        tags: ["Patients"],
+        summary: "Update patient details; pathologies adds, removePathologies removes (admin or assigned secretary)",
       },
     },
     "/patients/{patientId}/assignments": {

@@ -4,6 +4,7 @@ import { asyncHandler } from "../../utils/asyncHandler";
 import { ApiError } from "../../utils/apiError";
 import {
   bootstrapAdmin,
+  changeOwnPassword,
   createUser,
   getCurrentUser,
   login,
@@ -12,6 +13,7 @@ import {
 } from "./auth.service";
 import {
   bootstrapAdminSchema,
+  changePasswordSchema,
   createUserSchema,
   loginSchema,
   logoutSchema,
@@ -92,6 +94,24 @@ export const authController = {
 
     res.status(200).json({
       message: "Logout successful",
+    });
+  }),
+
+  changePassword: asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new ApiError(401, "Authentication is required");
+    }
+
+    const parsed = changePasswordSchema.parse({ body: req.body });
+    await changeOwnPassword({
+      userId: req.user.id,
+      currentPassword: parsed.body.currentPassword,
+      newPassword: parsed.body.newPassword,
+      currentRefreshToken: req.cookies.refreshToken,
+    });
+
+    res.status(200).json({
+      message: "Password changed. Other sessions have been signed out.",
     });
   }),
 

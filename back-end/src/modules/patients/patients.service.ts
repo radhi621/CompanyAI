@@ -77,10 +77,13 @@ export const patientsService = {
   async update(
     patientId: string,
     data: {
+      firstName?: string;
+      lastName?: string;
       phone?: string;
       email?: string;
       dateOfBirth?: Date;
       pathologies?: string[];
+      removePathologies?: string[];
     },
     actor: AuthUser,
   ): Promise<IPatientDocument> {
@@ -96,6 +99,12 @@ export const patientsService = {
       throw new ApiError(403, "You are not assigned to this patient");
     }
 
+    if (data.firstName !== undefined) patient.firstName = data.firstName.trim();
+    if (data.lastName !== undefined) patient.lastName = data.lastName.trim();
+    if (data.removePathologies !== undefined) {
+      const toRemove = new Set(data.removePathologies.map((p) => p.trim().toLowerCase()));
+      patient.pathologies = patient.pathologies.filter((p) => !toRemove.has(p.toLowerCase()));
+    }
     if (data.phone !== undefined) patient.phone = data.phone.trim();
     if (data.email !== undefined) patient.email = data.email.trim().toLowerCase();
     if (data.dateOfBirth !== undefined) patient.dateOfBirth = data.dateOfBirth;

@@ -16,6 +16,7 @@ import type { AuthUser, UserRole } from "../../types/auth";
 import { ApiError } from "../../utils/apiError";
 import { appointmentsService } from "../appointments/appointments.service";
 import { doctorsService } from "../doctors/doctors.service";
+import { patientNotesService } from "../patients/patientNotes.service";
 import { patientsService } from "../patients/patients.service";
 import { ragService } from "../../services/rag/ragService";
 
@@ -203,31 +204,41 @@ const toolRegistry = {
   }),
 
   update_patient: defineTool({
-    description: "Updates patient fields such as phone, email, date of birth, or pathologies",
+    description:
+      "Updates patient fields such as name, phone, email, date of birth, or pathologies (add with pathologies, remove with removePathologies)",
     allowedRoles: ["admin", "secretary"],
     destructive: false,
     argsShape: {
       patientId: "required MongoDB ObjectId",
+      firstName: "optional string",
+      lastName: "optional string",
       phone: "optional string",
       email: "optional email",
       dateOfBirth: "optional date string YYYY-MM-DD",
-      pathologies: "optional array of strings",
+      pathologies: "optional array of strings to add",
+      removePathologies: "optional array of strings to remove",
     },
     argsSchema: z.object({
       patientId: objectIdSchema,
+      firstName: z.string().trim().min(2).max(80).optional(),
+      lastName: z.string().trim().min(2).max(80).optional(),
       phone: z.string().min(5).max(30).optional(),
       email: z.string().email().optional(),
       dateOfBirth: z.coerce.date().optional(),
       pathologies: z.array(z.string().min(2).max(100)).optional(),
+      removePathologies: z.array(z.string().min(1).max(100)).optional(),
     }),
     run: async (args, context) => {
       const patient = await patientsService.update(
         args.patientId,
         {
+          firstName: args.firstName,
+          lastName: args.lastName,
           phone: args.phone?.trim(),
           email: args.email?.trim().toLowerCase(),
           dateOfBirth: args.dateOfBirth,
           pathologies: args.pathologies,
+          removePathologies: args.removePathologies,
         },
         context.actor,
       );
@@ -854,14 +865,7 @@ const toolRegistry = {
       note: z.string().min(3).max(4000),
     }),
     run: async (args, context) => {
-      await assertPatientAccess(context.actor, args.patientId);
-
-      const note = await PatientNoteModel.create({
-        patientId: new Types.ObjectId(args.patientId),
-        content: args.note,
-        createdBy: new Types.ObjectId(context.actor.id),
-        createdByRole: context.actor.role,
-      });
+      const note = await patientNotesService.create(args.patientId, context.actor, args.note);
 
       return {
         noteId: note._id.toString(),
@@ -884,16 +888,7 @@ const toolRegistry = {
       limit: z.coerce.number().int().positive().max(50).default(20),
     }),
     run: async (args, context) => {
-      await assertPatientAccess(context.actor, args.patientId);
-
-      const notes = await PatientNoteModel.find({
-        patientId: new Types.ObjectId(args.patientId),
-        deletedAt: { $exists: false },
-      })
-        .sort({ createdAt: -1 })
-        .limit(args.limit)
-        .select("content createdBy createdByRole createdAt")
-        .populate("createdBy", "name role");
+      const notes = await patientNotesService.list(args.patientId, context.actor, args.limit);
 
       return {
         patientId: args.patientId,
@@ -920,22 +915,7 @@ const toolRegistry = {
       noteId: objectIdSchema,
     }),
     run: async (args, context) => {
-      const note = await PatientNoteModel.findOne({
-        _id: new Types.ObjectId(args.noteId),
-        deletedAt: { $exists: false },
-      });
-
-      if (!note) {
-        throw new ApiError(404, "Patient note not found or already deleted");
-      }
-
-      if (context.actor.role !== "admin" && note.createdBy.toString() !== context.actor.id) {
-        throw new ApiError(403, "You can only delete your own notes");
-      }
-
-      note.deletedAt = new Date();
-      note.deletedBy = new Types.ObjectId(context.actor.id);
-      await note.save();
+      const note = await patientNotesService.softDelete(args.noteId, context.actor);
 
       return {
         noteId: note._id.toString(),
