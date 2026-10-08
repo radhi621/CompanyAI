@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import jwt, { type SignOptions } from "jsonwebtoken";
 import { env } from "../config/env";
 import type { JwtPayload } from "../types/auth";
@@ -26,6 +27,8 @@ export const signRefreshToken = (identity: TokenIdentity): string => {
     env.JWT_REFRESH_SECRET,
     {
       expiresIn: env.JWT_REFRESH_EXPIRES_IN as SignOptions["expiresIn"],
+      // Unique ID so two tokens issued in the same second never collide on tokenHash.
+      jwtid: crypto.randomUUID(),
     },
   );
 };

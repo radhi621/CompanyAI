@@ -183,8 +183,14 @@ export const rotateRefreshToken = async (
     throw new ApiError(401, "User no longer available");
   }
 
-  tokenDoc.revokedAt = new Date();
-  await tokenDoc.save();
+  // Claim the token atomically so two concurrent refreshes cannot both rotate it.
+  const claimed = await RefreshTokenModel.updateOne(
+    { _id: tokenDoc._id, revokedAt: { $exists: false } },
+    { $set: { revokedAt: new Date() } },
+  );
+  if (claimed.modifiedCount === 0) {
+    throw new ApiError(401, "Refresh token has already been revoked");
+  }
 
   const tokens = await issueTokens(user, userAgent, ipAddress);
   tokenDoc.replacedByTokenHash = hashRefreshToken(tokens.refreshToken);

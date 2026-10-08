@@ -38,9 +38,11 @@ type StatusFilter = "all" | "planned" | "confirmed" | "completed" | "cancelled" 
 
 interface CalendarProps {
   token: string | null;
+  /** Exchanges the refresh cookie for a new access token; resolves null if the session ended. */
+  refreshAccessToken?: () => Promise<string | null>;
 }
 
-export default function Calendar({ token }: CalendarProps) {
+export default function Calendar({ token, refreshAccessToken }: CalendarProps) {
   const today = useMemo(() => {
     const d = new Date();
     d.setHours(0, 0, 0, 0);
@@ -56,6 +58,24 @@ export default function Calendar({ token }: CalendarProps) {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [feedback, setFeedback] = useState("");
 
+  // Retries once with a refreshed token when the access token has expired.
+  const authFetch = useCallback(
+    async (path: string, init: RequestInit = {}): Promise<Response> => {
+      const send = (accessToken: string | null) => {
+        const headers = new Headers(init.headers);
+        if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+        return fetch(buildUrl(path), { ...init, headers, cache: "no-store" });
+      };
+
+      const res = await send(token);
+      if (res.status !== 401 || !refreshAccessToken) return res;
+
+      const refreshed = await refreshAccessToken();
+      return refreshed ? send(refreshed) : res;
+    },
+    [token, refreshAccessToken],
+  );
+
   const fetchAppointments = useCallback(async () => {
     if (!token) return;
     setLoading(true);
@@ -65,10 +85,7 @@ export default function Calendar({ token }: CalendarProps) {
     const from = new Date(year, month, 1).toISOString();
     const to = new Date(year, month + 1, 0, 23, 59, 59).toISOString();
     try {
-      const res = await fetch(buildUrl(`/appointments?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=200`), {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: "no-store",
-      });
+      const res = await authFetch(`/appointments?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=200`);
       const json = await res.json();
       if (!res.ok) throw new Error(json.message || "Failed to fetch appointments");
       setAppointments(json.data || []);
@@ -77,7 +94,7 @@ export default function Calendar({ token }: CalendarProps) {
     } finally {
       setLoading(false);
     }
-  }, [token, viewDate]);
+  }, [authFetch, token, viewDate]);
 
   useEffect(() => {
     fetchAppointments();
@@ -147,9 +164,9 @@ export default function Calendar({ token }: CalendarProps) {
       notes: (form.elements.namedItem("notes") as HTMLTextAreaElement).value || undefined,
     };
     try {
-      const res = await fetch(buildUrl("/appointments"), {
+      const res = await authFetch("/appointments", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
       });
       const json = await res.json();
@@ -180,9 +197,9 @@ export default function Calendar({ token }: CalendarProps) {
     const statusVal = (form.elements.namedItem("status") as HTMLSelectElement).value;
     if (statusVal) body.status = statusVal;
     try {
-      const res = await fetch(buildUrl(`/appointments/${editingAppointment._id}`), {
+      const res = await authFetch(`/appointments/${editingAppointment._id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       const json = await res.json();
@@ -198,10 +215,7 @@ export default function Calendar({ token }: CalendarProps) {
   async function handleDeleteAppointment(id: string) {
     if (!token) return;
     try {
-      const res = await fetch(buildUrl(`/appointments/${id}`), {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`/appointments/${id}`, { method: "DELETE" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.message || "Failed to delete");
       setFeedback("Appointment deleted");
