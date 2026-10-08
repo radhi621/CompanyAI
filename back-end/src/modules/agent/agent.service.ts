@@ -791,10 +791,10 @@ async function executeCalls(
         });
       }
 
+      console.error(`[agent] Tool ${effectiveCall.tool} failed:`, error);
       throw new ApiError(500, `Tool execution failed: ${effectiveCall.tool}`, {
         tool: effectiveCall.tool,
         args: effectiveCall.args,
-        error: extractErrorMessage(error),
       });
     }
 
@@ -1167,12 +1167,20 @@ export const agentService = {
         throw new ApiError(410, "Pending action has expired");
       }
 
-      const pending = existing;
+      // Claim the action atomically so two concurrent confirmations cannot both run it.
+      const pending = await AgentPendingActionModel.findOneAndUpdate(
+        { _id: pendingActionObjectId, status: "pending" },
+        input.approved
+          ? { $set: { status: "approved", approvedAt: new Date() } }
+          : { $set: { status: "rejected" } },
+        { new: true },
+      );
+
+      if (!pending) {
+        throw new ApiError(409, "Pending action is already being processed");
+      }
 
       if (!input.approved) {
-        pending.status = "rejected";
-        await pending.save();
-
         await AgentAuditLogModel.create({
           actorId: new Types.ObjectId(input.actor.id),
           actorRole: input.actor.role,
@@ -1202,11 +1210,18 @@ export const agentService = {
         args: c.args as Record<string, unknown>,
         reason: c.reason,
       }));
-      const executionResults = await executeCalls(input.actor, pending.prompt, plainCalls);
+      let executionResults: ExecutedToolResult[];
+      try {
+        executionResults = await executeCalls(input.actor, pending.prompt, plainCalls);
+      } catch (error) {
+        // Some calls may already have run, so never return the action to "pending".
+        pending.status = "failed";
+        await pending.save();
+        throw error;
+      }
 
       pending.status = "executed";
       pending.executedAt = new Date();
-      pending.approvedAt = new Date();
       await pending.save();
 
       await AgentAuditLogModel.create({

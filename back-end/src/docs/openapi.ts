@@ -26,13 +26,13 @@ export const openApiDocument = {
     "/auth/login": {
       post: {
         tags: ["Auth"],
-        summary: "Login and receive access/refresh tokens",
+        summary: "Login; returns an access token and sets the refresh token as an httpOnly cookie",
       },
     },
     "/auth/refresh": {
       post: {
         tags: ["Auth"],
-        summary: "Rotate refresh token and issue new tokens",
+        summary: "Rotate the refresh token (cookie) and issue a new access token",
       },
     },
     "/auth/me": {

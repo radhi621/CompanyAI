@@ -67,6 +67,10 @@ function parseTime(value: string): { hour: number; minute: number } {
   };
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function overlapExists(startA: Date, endA: Date, startB: Date, endB: Date): boolean {
   return startA < endB && endA > startB;
 }
@@ -130,7 +134,7 @@ export const doctorsService = {
   async list(input: ListDoctorsInput): Promise<IDoctorDocument[]> {
     const query: Record<string, unknown> = {};
     if (input.specialty) {
-      query.specialty = new RegExp(input.specialty, "i");
+      query.specialty = new RegExp(escapeRegex(input.specialty), "i");
     }
     if (input.isActive !== undefined) {
       query.isActive = input.isActive;

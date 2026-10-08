@@ -56,7 +56,7 @@ export const authController = {
     res.cookie("refreshToken", result.refreshToken, refreshCookieOptions);
     res.status(200).json({
       message: "Login successful",
-      data: result,
+      data: { user: result.user, accessToken: result.accessToken },
     });
   }),
 
@@ -73,7 +73,7 @@ export const authController = {
 
     res.status(200).json({
       message: "Token refreshed successfully",
-      data: result,
+      data: { user: result.user, accessToken: result.accessToken },
     });
   }),
 
