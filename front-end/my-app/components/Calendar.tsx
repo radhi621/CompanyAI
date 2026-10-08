@@ -17,6 +17,17 @@ function extractErrorMessage(error: unknown): string {
   return String(error);
 }
 
+// Builds a UTC ISO timestamp from a local calendar day and an "HH:mm" time picked in the browser.
+function toIsoFromLocal(day: Date, time: string): string {
+  const [hours, minutes] = time.split(":").map(Number);
+  return new Date(day.getFullYear(), day.getMonth(), day.getDate(), hours, minutes).toISOString();
+}
+
+function toLocalTimeValue(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 function formatTime(iso: string) {
   const d = new Date(iso);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -24,7 +35,7 @@ function formatTime(iso: string) {
 
 interface Appointment {
   _id: string;
-  patientId: { _id: string; name?: string } | string;
+  patientId: { _id: string; firstName?: string; lastName?: string } | string;
   doctorId: { _id: string; name?: string } | string;
   startAt: string;
   endAt: string;
@@ -97,7 +108,12 @@ export default function Calendar({ token, refreshAccessToken }: CalendarProps) {
   }, [authFetch, token, viewDate]);
 
   useEffect(() => {
-    fetchAppointments();
+    // Deferred so the loading state is not set synchronously inside the effect.
+    const timerId = window.setTimeout(() => {
+      void fetchAppointments();
+    }, 0);
+
+    return () => window.clearTimeout(timerId);
   }, [fetchAppointments]);
 
   const year = viewDate.getFullYear();
@@ -147,7 +163,10 @@ export default function Calendar({ token, refreshAccessToken }: CalendarProps) {
 
   function getPatientName(a: Appointment): string {
     const p = a.patientId;
-    if (typeof p === "object" && p !== null) return (p as { name?: string }).name || (p as { _id: string })._id.slice(-6);
+    if (typeof p === "object" && p !== null) {
+      const fullName = [p.firstName, p.lastName].filter(Boolean).join(" ");
+      return fullName || p._id.slice(-6);
+    }
     return String(p).slice(-6);
   }
 
@@ -158,7 +177,7 @@ export default function Calendar({ token, refreshAccessToken }: CalendarProps) {
     const data = {
       patientId: (form.elements.namedItem("patientId") as HTMLInputElement).value,
       doctorId: (form.elements.namedItem("doctorId") as HTMLInputElement).value,
-      startAt: `${selectedDay.toISOString().slice(0, 10)}T${(form.elements.namedItem("time") as HTMLInputElement).value}:00.000Z`,
+      startAt: toIsoFromLocal(selectedDay, (form.elements.namedItem("time") as HTMLInputElement).value),
       estimatedDurationMinutes: parseInt((form.elements.namedItem("duration") as HTMLInputElement).value, 10),
       reason: (form.elements.namedItem("reason") as HTMLInputElement).value,
       notes: (form.elements.namedItem("notes") as HTMLTextAreaElement).value || undefined,
@@ -184,16 +203,19 @@ export default function Calendar({ token, refreshAccessToken }: CalendarProps) {
     if (!token || !editingAppointment) return;
     const form = e.currentTarget;
     const body: Record<string, unknown> = {};
+    // Only send time/duration when they changed, so status or note edits are not treated as a reschedule.
     const timeVal = (form.elements.namedItem("time") as HTMLInputElement).value;
-    if (timeVal) {
-      body.startAt = `${new Date(editingAppointment.startAt).toISOString().slice(0, 10)}T${timeVal}:00.000Z`;
+    if (timeVal && timeVal !== toLocalTimeValue(editingAppointment.startAt)) {
+      body.startAt = toIsoFromLocal(new Date(editingAppointment.startAt), timeVal);
     }
     const durationVal = (form.elements.namedItem("duration") as HTMLInputElement).value;
-    if (durationVal) body.estimatedDurationMinutes = parseInt(durationVal, 10);
+    if (durationVal && parseInt(durationVal, 10) !== editingAppointment.estimatedDurationMinutes) {
+      body.estimatedDurationMinutes = parseInt(durationVal, 10);
+    }
     const reasonVal = (form.elements.namedItem("reason") as HTMLInputElement).value;
-    if (reasonVal) body.reason = reasonVal;
+    if (reasonVal && reasonVal !== editingAppointment.reason) body.reason = reasonVal;
     const notesVal = (form.elements.namedItem("notes") as HTMLTextAreaElement).value;
-    body.notes = notesVal || undefined;
+    if (notesVal !== (editingAppointment.notes || "")) body.notes = notesVal;
     const statusVal = (form.elements.namedItem("status") as HTMLSelectElement).value;
     if (statusVal) body.status = statusVal;
     try {
@@ -386,7 +408,7 @@ export default function Calendar({ token, refreshAccessToken }: CalendarProps) {
               <input
                 name="time"
                 type="time"
-                defaultValue={new Date(editingAppointment.startAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}
+                defaultValue={toLocalTimeValue(editingAppointment.startAt)}
                 className="w-24 rounded border border-[#d7ccb8] bg-white px-2 py-1 text-[10px]"
               />
               <input

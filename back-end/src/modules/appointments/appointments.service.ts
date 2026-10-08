@@ -7,6 +7,7 @@ import {
   type IAppointmentDocument,
 } from "../../models/Appointment";
 import { DoctorModel } from "../../models/Doctor";
+import { assertWithinDoctorSchedule } from "../doctors/doctors.service";
 import { PatientModel } from "../../models/Patient";
 import type { AuthUser } from "../../types/auth";
 import { ApiError } from "../../utils/apiError";
@@ -168,6 +169,15 @@ async function assertNoConflict(
   }
 }
 
+// Small allowance so a booking made "now" is not rejected by clock drift or form latency.
+const PAST_BOOKING_GRACE_MS = 5 * 60 * 1000;
+
+function assertNotInPast(startAt: Date): void {
+  if (startAt.getTime() < Date.now() - PAST_BOOKING_GRACE_MS) {
+    throw new ApiError(400, "Appointments cannot be scheduled in the past");
+  }
+}
+
 async function getAppointmentOrThrow(appointmentId: string): Promise<IAppointmentDocument> {
   const appointment = await AppointmentModel.findById(appointmentId);
   if (!appointment || appointment.deletedAt) {
@@ -188,6 +198,8 @@ export const appointmentsService = {
       estimatedDurationMinutes: input.estimatedDurationMinutes,
     });
 
+    assertNotInPast(timing.startAt);
+    await assertWithinDoctorSchedule(input.doctorId, timing.startAt, timing.endAt);
     await assertNoConflict(input.doctorId, timing.startAt, timing.endAt);
 
     return AppointmentModel.create({
@@ -281,27 +293,40 @@ export const appointmentsService = {
       throw new ApiError(403, "Only owner or higher role can modify this appointment");
     }
 
-    const nextStartAt = input.startAt ?? appointment.startAt;
-    const nextEndAt = input.endAt;
-    const nextEstimated = input.estimatedDurationMinutes ?? appointment.estimatedDurationMinutes;
+    const timingChanged =
+      input.startAt !== undefined ||
+      input.endAt !== undefined ||
+      input.estimatedDurationMinutes !== undefined;
+    const nextStatus = input.status ?? appointment.status;
+    const reactivating = appointment.status === "cancelled" && nextStatus !== "cancelled";
 
-    const timing = resolveTimeRange({
-      actorRole: input.actor.role,
-      startAt: nextStartAt,
-      endAt: nextEndAt,
-      estimatedDurationMinutes: nextEstimated,
-    });
+    // Status, reason or notes changes (e.g. cancelling, or marking a past visit completed)
+    // must not be blocked by time checks; only re-validate when the slot itself changes
+    // or a cancelled appointment is reinstated.
+    if (timingChanged) {
+      const timing = resolveTimeRange({
+        actorRole: input.actor.role,
+        startAt: input.startAt ?? appointment.startAt,
+        endAt: input.endAt,
+        estimatedDurationMinutes: input.estimatedDurationMinutes ?? appointment.estimatedDurationMinutes,
+      });
 
-    await assertNoConflict(
-      appointment.doctorId.toString(),
-      timing.startAt,
-      timing.endAt,
-      appointment._id.toString(),
-    );
+      assertNotInPast(timing.startAt);
+      await assertWithinDoctorSchedule(appointment.doctorId.toString(), timing.startAt, timing.endAt);
 
-    appointment.startAt = timing.startAt;
-    appointment.endAt = timing.endAt;
-    appointment.estimatedDurationMinutes = timing.estimatedDurationMinutes;
+      appointment.startAt = timing.startAt;
+      appointment.endAt = timing.endAt;
+      appointment.estimatedDurationMinutes = timing.estimatedDurationMinutes;
+    }
+
+    if (nextStatus !== "cancelled" && (timingChanged || reactivating)) {
+      await assertNoConflict(
+        appointment.doctorId.toString(),
+        appointment.startAt,
+        appointment.endAt,
+        appointment._id.toString(),
+      );
+    }
 
     if (input.reason !== undefined) {
       appointment.reason = input.reason;
@@ -344,12 +369,14 @@ export const appointmentsService = {
       throw new ApiError(404, "Deleted appointment not found");
     }
 
-    await assertNoConflict(
-      appointment.doctorId.toString(),
-      appointment.startAt,
-      appointment.endAt,
-      appointment._id.toString(),
-    );
+    if (appointment.status !== "cancelled") {
+      await assertNoConflict(
+        appointment.doctorId.toString(),
+        appointment.startAt,
+        appointment.endAt,
+        appointment._id.toString(),
+      );
+    }
 
     appointment.deletedAt = undefined;
     appointment.deletedBy = undefined;

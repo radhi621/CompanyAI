@@ -516,11 +516,18 @@ const toolRegistry = {
       reason: z.string().max(600).optional(),
     }),
     run: async (args, context) => {
+      // Keep existing notes and append the cancellation reason instead of replacing them.
+      const existing = await appointmentsService.getById(args.appointmentId, context.actor);
+      const reason = args.reason?.trim();
+      const notes = reason
+        ? [existing.notes?.trim(), `Cancellation reason: ${reason}`].filter(Boolean).join("\n")
+        : undefined;
+
       const appointment = await appointmentsService.update({
         actor: context.actor,
         appointmentId: args.appointmentId,
         status: "cancelled",
-        notes: args.reason,
+        notes,
       });
 
       return {
