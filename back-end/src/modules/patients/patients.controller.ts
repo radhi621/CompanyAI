@@ -1,13 +1,18 @@
 import type { Request, Response } from "express";
 import { asyncHandler } from "../../utils/asyncHandler";
 import { ApiError } from "../../utils/apiError";
+import { patientNotesService } from "./patientNotes.service";
 import { patientsService } from "./patients.service";
 import {
+  createPatientNoteSchema,
   createPatientSchema,
+  listPatientNotesSchema,
   listPatientsSchema,
   patientIdSchema,
+  patientNoteIdSchema,
   updatePatientSchema,
   updateAssignmentsSchema,
+  updatePatientNoteSchema,
 } from "./patients.validation";
 
 export const patientsController = {
@@ -83,6 +88,66 @@ export const patientsController = {
     res.status(200).json({
       message: "Patient assignments updated successfully",
       data: patient,
+    });
+  }),
+
+  listNotes: asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new ApiError(401, "Authentication is required");
+    }
+
+    const parsed = listPatientNotesSchema.parse({ params: req.params, query: req.query });
+    const notes = await patientNotesService.list(parsed.params.patientId, req.user, parsed.query.limit);
+
+    res.status(200).json({
+      message: "Patient notes fetched successfully",
+      data: notes,
+    });
+  }),
+
+  createNote: asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new ApiError(401, "Authentication is required");
+    }
+
+    const parsed = createPatientNoteSchema.parse({ params: req.params, body: req.body });
+    const note = await patientNotesService.create(parsed.params.patientId, req.user, parsed.body.content);
+
+    res.status(201).json({
+      message: "Patient note created successfully",
+      data: note,
+    });
+  }),
+
+  updateNote: asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new ApiError(401, "Authentication is required");
+    }
+
+    const parsed = updatePatientNoteSchema.parse({ params: req.params, body: req.body });
+    const note = await patientNotesService.update(
+      parsed.params.noteId,
+      req.user,
+      parsed.body.content,
+      parsed.params.patientId,
+    );
+
+    res.status(200).json({
+      message: "Patient note updated successfully",
+      data: note,
+    });
+  }),
+
+  deleteNote: asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new ApiError(401, "Authentication is required");
+    }
+
+    const parsed = patientNoteIdSchema.parse({ params: req.params });
+    await patientNotesService.softDelete(parsed.params.noteId, req.user, parsed.params.patientId);
+
+    res.status(200).json({
+      message: "Patient note deleted successfully",
     });
   }),
 };

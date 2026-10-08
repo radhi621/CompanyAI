@@ -5,10 +5,12 @@ import { appointmentRoutes } from "../modules/appointments/appointments.routes";
 import { authRoutes } from "../modules/auth/auth.routes";
 import { doctorRoutes } from "../modules/doctors/doctors.routes";
 import { patientRoutes } from "../modules/patients/patients.routes";
+import { userRoutes } from "../modules/users/users.routes";
 
 export const apiRouter = Router();
 
 apiRouter.use("/auth", authRoutes);
+apiRouter.use("/users", userRoutes);
 apiRouter.use("/patients", patientRoutes);
 apiRouter.use("/doctors", doctorRoutes);
 apiRouter.use("/appointments", appointmentRoutes);
