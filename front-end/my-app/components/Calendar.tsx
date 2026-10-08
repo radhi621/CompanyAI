@@ -51,9 +51,11 @@ interface CalendarProps {
   token: string | null;
   /** Exchanges the refresh cookie for a new access token; resolves null if the session ended. */
   refreshAccessToken?: () => Promise<string | null>;
+  /** Admins may book outside a doctor's working hours. */
+  isAdmin?: boolean;
 }
 
-export default function Calendar({ token, refreshAccessToken }: CalendarProps) {
+export default function Calendar({ token, refreshAccessToken, isAdmin = false }: CalendarProps) {
   const today = useMemo(() => {
     const d = new Date();
     d.setHours(0, 0, 0, 0);
@@ -181,6 +183,8 @@ export default function Calendar({ token, refreshAccessToken }: CalendarProps) {
       estimatedDurationMinutes: parseInt((form.elements.namedItem("duration") as HTMLInputElement).value, 10),
       reason: (form.elements.namedItem("reason") as HTMLInputElement).value,
       notes: (form.elements.namedItem("notes") as HTMLTextAreaElement).value || undefined,
+      allowOutsideSchedule:
+        (form.elements.namedItem("allowOutsideSchedule") as HTMLInputElement | null)?.checked || undefined,
     };
     try {
       const res = await authFetch("/appointments", {
@@ -218,6 +222,9 @@ export default function Calendar({ token, refreshAccessToken }: CalendarProps) {
     if (notesVal !== (editingAppointment.notes || "")) body.notes = notesVal;
     const statusVal = (form.elements.namedItem("status") as HTMLSelectElement).value;
     if (statusVal) body.status = statusVal;
+    if ((form.elements.namedItem("allowOutsideSchedule") as HTMLInputElement | null)?.checked) {
+      body.allowOutsideSchedule = true;
+    }
     try {
       const res = await authFetch(`/appointments/${editingAppointment._id}`, {
         method: "PATCH",
@@ -390,6 +397,12 @@ export default function Calendar({ token, refreshAccessToken }: CalendarProps) {
             </div>
             <input name="reason" placeholder="Reason" required className="rounded border border-[#d7ccb8] bg-white px-2 py-1 text-[10px]" />
             <textarea name="notes" placeholder="Notes (optional)" rows={2} className="rounded border border-[#d7ccb8] bg-white px-2 py-1 text-[10px]" />
+            {isAdmin && (
+              <label className="flex items-center gap-1 text-[10px] text-[#6a5b43]">
+                <input name="allowOutsideSchedule" type="checkbox" />
+                Allow outside the doctor&apos;s working hours (admin)
+              </label>
+            )}
             <div className="flex gap-1">
               <button type="submit" className="flex-1 rounded bg-[#2f2a21] py-1 text-[10px] font-medium text-[#f8f4ec]">Create</button>
               <button type="button" onClick={() => setShowCreateForm(false)} className="rounded border border-[#d7ccb8] px-3 py-1 text-[10px] text-[#6a5b43]">Cancel</button>
@@ -444,6 +457,12 @@ export default function Calendar({ token, refreshAccessToken }: CalendarProps) {
               rows={2}
               className="rounded border border-[#d7ccb8] bg-white px-2 py-1 text-[10px]"
             />
+            {isAdmin && (
+              <label className="flex items-center gap-1 text-[10px] text-[#6a5b43]">
+                <input name="allowOutsideSchedule" type="checkbox" />
+                Allow outside the doctor&apos;s working hours (admin)
+              </label>
+            )}
             <div className="flex gap-1">
               <button type="submit" className="flex-1 rounded bg-[#2f2a21] py-1 text-[10px] font-medium text-[#f8f4ec]">Update</button>
               <button

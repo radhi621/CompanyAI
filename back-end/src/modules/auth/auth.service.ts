@@ -31,6 +31,8 @@ interface LoginInput {
   password: string;
 }
 
+const REFRESH_REUSE_GRACE_MS = 30 * 1000;
+
 const refreshTokenTtlMs = toMilliseconds(env.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60 * 1000);
 
 function toMilliseconds(value: string, defaultMs: number): number {
@@ -171,6 +173,16 @@ export const rotateRefreshToken = async (
   }
 
   if (tokenDoc.revokedAt) {
+    // A token that was rotated away is being presented again. Outside a short grace
+    // window (two tabs refreshing at the same moment) that means a copy of it leaked,
+    // so end every session for this user and force a fresh login.
+    const rotatedAgoMs = Date.now() - tokenDoc.revokedAt.getTime();
+    if (tokenDoc.replacedByTokenHash && rotatedAgoMs > REFRESH_REUSE_GRACE_MS) {
+      await revokeUserRefreshTokens(tokenDoc.userId.toString());
+      console.warn(`[auth] Refresh token reuse detected for user ${tokenDoc.userId}; all sessions revoked`);
+      throw new ApiError(401, "Session ended for security reasons. Please log in again.");
+    }
+
     throw new ApiError(401, "Refresh token has already been revoked");
   }
 

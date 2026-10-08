@@ -1100,6 +1100,18 @@ export const isToolAllowedForRole = (tool: AgentToolName, role: UserRole): boole
   return toolRegistry[tool].allowedRoles.includes(role);
 };
 
+/** Returns a readable description of why a call's args are invalid, or null if they are valid. */
+export const getToolArgsIssue = (call: IAgentToolCall): string | null => {
+  const result = toolRegistry[call.tool].argsSchema.safeParse(call.args ?? {});
+  if (result.success) {
+    return null;
+  }
+
+  return result.error.issues
+    .map((issue) => `${issue.path.join(".") || "args"}: ${issue.message}`)
+    .join("; ");
+};
+
 export const executeToolCall = async (
   call: IAgentToolCall,
   context: AgentToolContext,

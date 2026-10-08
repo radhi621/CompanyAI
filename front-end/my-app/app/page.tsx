@@ -64,13 +64,6 @@ interface AgentConfirmResult {
   results?: unknown;
 }
 
-interface ExecutedToolResult {
-  tool: string;
-  args?: Record<string, unknown>;
-  result?: unknown;
-  error?: string;
-}
-
 interface PendingActionState {
   id: string;
   expiresAt?: string;
@@ -330,166 +323,6 @@ function sanitizeToolCalls(value: unknown): AgentToolCall[] {
       },
     ];
   });
-}
-
-function toExecutedToolResults(value: unknown): ExecutedToolResult[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value.flatMap((item) => {
-    if (!isRecord(item)) {
-      return [];
-    }
-
-    const tool = toOptionalString(item.tool);
-    if (!tool) {
-      return [];
-    }
-
-    return [
-      {
-        tool,
-        args: isRecord(item.args) ? item.args : undefined,
-        result: item.result,
-        error: toOptionalString(item.error),
-      },
-    ];
-  });
-}
-
-function truncateText(value: string, maxLength: number): string {
-  if (value.length <= maxLength) {
-    return value;
-  }
-
-  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
-}
-
-function humanizeToolName(tool: string): string {
-  return tool.replaceAll("_", " ").trim();
-}
-
-function pickListPreviewLabel(value: unknown): string | null {
-  if (typeof value === "string") {
-    return value.trim() || null;
-  }
-
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const firstName = toOptionalString(value.firstName);
-  const lastName = toOptionalString(value.lastName);
-  if (firstName || lastName) {
-    return `${firstName ?? ""} ${lastName ?? ""}`.trim();
-  }
-
-  return (
-    toOptionalString(value.name) ??
-    toOptionalString(value.fullName) ??
-    toOptionalString(value.title) ??
-    toOptionalString(value.reason) ??
-    toOptionalString(value.cin) ??
-    null
-  );
-}
-
-function summarizeSingleToolResult(tool: string, result: unknown): string {
-  if (tool === "search_medical_records_RAG" || tool === "search_global_knowledge_RAG") {
-    if (isRecord(result) && Array.isArray(result.matches)) {
-      const matches = result.matches;
-      if (matches.length === 0) {
-        return "No relevant context found.";
-      }
-
-      const first = matches[0];
-      if (isRecord(first) && typeof first.content === "string") {
-        return `${matches.length} context chunk(s) found. Top match: \"${truncateText(
-          first.content.replace(/\s+/g, " ").trim(),
-          180,
-        )}\"`;
-      }
-
-      return `${matches.length} context chunk(s) found.`;
-    }
-  }
-
-  if (isRecord(result)) {
-    const explicitMessage = toOptionalString(result.message);
-    if (explicitMessage) {
-      return explicitMessage;
-    }
-
-    const preferredArrayKey = ["patients", "doctors", "appointments", "matches"].find((key) =>
-      Array.isArray(result[key]),
-    );
-
-    if (preferredArrayKey) {
-      const entries = result[preferredArrayKey] as unknown[];
-      if (entries.length === 0) {
-        return `${preferredArrayKey} list is empty.`;
-      }
-
-      const previews = entries
-        .map((entry) => pickListPreviewLabel(entry))
-        .filter((label): label is string => Boolean(label))
-        .slice(0, 3);
-
-      if (previews.length > 0) {
-        return `${entries.length} item(s). Example: ${previews.join(" | ")}${
-          entries.length > previews.length ? " | ..." : ""
-        }`;
-      }
-
-      return `${entries.length} item(s) returned.`;
-    }
-
-    const genericArrayEntry = Object.entries(result).find(([, value]) => Array.isArray(value));
-    if (genericArrayEntry) {
-      const [key, value] = genericArrayEntry;
-      return `${Array.isArray(value) ? value.length : 0} ${key} item(s) returned.`;
-    }
-
-    const idCandidate = toOptionalString(result._id) ?? toOptionalString(result.id);
-    if (idCandidate) {
-      return `Completed (id: ${idCandidate}).`;
-    }
-
-    const preview = truncateText(JSON.stringify(result), 220);
-    return preview;
-  }
-
-  if (Array.isArray(result)) {
-    return `${result.length} item(s) returned.`;
-  }
-
-  if (typeof result === "string") {
-    return result;
-  }
-
-  if (typeof result === "number" || typeof result === "boolean") {
-    return String(result);
-  }
-
-  return "Completed.";
-}
-
-function summarizeToolExecutionLines(results: unknown): string[] {
-  const toolResults = toExecutedToolResults(results);
-  if (toolResults.length === 0) {
-    return [];
-  }
-
-  const lines = toolResults.map((entry) => {
-    if (entry.error) {
-      return `- ${humanizeToolName(entry.tool)}: Failed (${entry.error})`;
-    }
-
-    return `- ${humanizeToolName(entry.tool)}: ${summarizeSingleToolResult(entry.tool, entry.result)}`;
-  });
-
-  return ["Tool results:", ...lines];
 }
 
 function summarizeExecutionResult(result: AgentExecutionResult): string {
@@ -2436,7 +2269,7 @@ export default function Home() {
             icon: CalendarIcon(),
             defaultOpen: false,
             children: (
-              <Calendar token={token} refreshAccessToken={refreshAccessToken} />
+              <Calendar token={token} refreshAccessToken={refreshAccessToken} isAdmin={currentUser.role === "admin"} />
             ),
           })}
 

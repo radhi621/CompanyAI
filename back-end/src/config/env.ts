@@ -8,6 +8,11 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   MONGODB_URI: z.string().min(1, "MONGODB_URI is required"),
   CORS_ORIGIN: z.string().default("http://localhost:3000"),
+  // Comma-separated DNS servers to use instead of the system resolver, e.g. "1.1.1.1,8.8.8.8".
+  DNS_SERVERS: z
+    .string()
+    .default("")
+    .transform((value) => value.split(",").map((server) => server.trim()).filter(Boolean)),
   APP_TIMEZONE: z.string().default("Africa/Casablanca"),
   DEFAULT_APPOINTMENT_DURATION_MINUTES: z.coerce.number().int().positive().default(45),
   MAX_APPOINTMENT_DURATION_MINUTES: z.coerce.number().int().positive().default(720),

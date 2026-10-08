@@ -22,6 +22,8 @@ export const createAppointmentSchema = z.object({
     status: appointmentStatusSchema.optional(),
     source: z.enum(["manual", "ai"]).optional(),
     notes: z.string().max(3000).optional(),
+    // Admin-only: book outside the doctor's working hours (e.g. emergencies).
+    allowOutsideSchedule: z.boolean().optional(),
   }),
 });
 
@@ -58,6 +60,7 @@ export const updateAppointmentSchema = z.object({
       reason: z.string().min(3).max(600).optional(),
       status: appointmentStatusSchema.optional(),
       notes: z.string().max(3000).optional(),
+      allowOutsideSchedule: z.boolean().optional(),
     })
     .refine((body) => Object.keys(body).length > 0, {
       message: "At least one field is required for update",
