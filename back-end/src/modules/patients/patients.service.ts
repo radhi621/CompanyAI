@@ -82,10 +82,18 @@ export const patientsService = {
       dateOfBirth?: Date;
       pathologies?: string[];
     },
+    actor: AuthUser,
   ): Promise<IPatientDocument> {
     const patient = await PatientModel.findById(patientId);
     if (!patient) {
       throw new ApiError(404, "Patient not found");
+    }
+
+    if (
+      actor.role !== "admin" &&
+      !patient.assignedStaff.some((staffId) => staffId.toString() === actor.id)
+    ) {
+      throw new ApiError(403, "You are not assigned to this patient");
     }
 
     if (data.phone !== undefined) patient.phone = data.phone.trim();

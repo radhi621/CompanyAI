@@ -60,8 +60,12 @@ export const patientsController = {
   }),
 
   update: asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new ApiError(401, "Authentication is required");
+    }
+
     const parsed = updatePatientSchema.parse({ params: req.params, body: req.body });
-    const patient = await patientsService.update(parsed.params.patientId, parsed.body);
+    const patient = await patientsService.update(parsed.params.patientId, parsed.body, req.user);
 
     res.status(200).json({
       message: "Patient updated successfully",

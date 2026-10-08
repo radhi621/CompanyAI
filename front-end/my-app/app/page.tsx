@@ -195,11 +195,6 @@ const QUICK_ACTIONS: Array<{ title: string; mode: PromptMode; prompt: string }> 
     prompt: "Delete patient note <NOTE_ID>.",
   },
   {
-    title: "Create staff account",
-    mode: "insert",
-    prompt: "Create a staff account for <NAME>, email <EMAIL>, password <PASSWORD>, role <ROLE>.",
-  },
-  {
     title: "Create doctor profile",
     mode: "insert",
     prompt: "Create a doctor profile for <NAME>, specialty <SPECIALTY>, license number <LICENSE>.",
@@ -1079,6 +1074,17 @@ export default function Home() {
   const [maxToolCalls, setMaxToolCalls] = useState(3);
   const [promptInput, setPromptInput] = useState("");
 
+  const [staffForm, setStaffForm] = useState<{
+    name: string;
+    email: string;
+    password: string;
+    role: UserRole;
+  }>({
+    name: "",
+    email: "",
+    password: "",
+    role: "secretary",
+  });
   const [showFolderForm, setShowFolderForm] = useState(false);
   const [newFolderForm, setNewFolderForm] = useState({
     name: "",
@@ -1409,6 +1415,26 @@ export default function Home() {
 
       setFeedback("Admin created successfully. You can now log in.");
       setBootstrapForm({ bootstrapKey: "", name: "", email: "", password: "" });
+    } catch (error) {
+      setFeedback(extractErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCreateStaff = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setBusy(true);
+    setFeedback(null);
+
+    try {
+      const user = await apiRequest<AuthUser>("/auth/users", {
+        method: "POST",
+        body: JSON.stringify(staffForm),
+      });
+
+      setFeedback(`Staff account created for ${user.email} (${user.role}).`);
+      setStaffForm({ name: "", email: "", password: "", role: "secretary" });
     } catch (error) {
       setFeedback(extractErrorMessage(error));
     } finally {
@@ -2295,6 +2321,68 @@ export default function Home() {
               </form>
             ),
           })}
+
+          {currentUser.role === "admin" &&
+            DropdownSection({
+              title: "Staff Accounts",
+              subtitle: "Create logins for staff (admin only)",
+              icon: UserIcon(),
+              children: (
+                <form className="grid gap-2" onSubmit={(event) => void handleCreateStaff(event)}>
+                  <input
+                    className="rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
+                    placeholder="Full name"
+                    value={staffForm.name}
+                    onChange={(event) =>
+                      setStaffForm((current) => ({ ...current, name: event.target.value }))
+                    }
+                    minLength={2}
+                    required
+                  />
+                  <input
+                    type="email"
+                    className="rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
+                    placeholder="Email"
+                    value={staffForm.email}
+                    onChange={(event) =>
+                      setStaffForm((current) => ({ ...current, email: event.target.value }))
+                    }
+                    required
+                  />
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    className="rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
+                    placeholder="Temporary password (min 8 chars)"
+                    value={staffForm.password}
+                    onChange={(event) =>
+                      setStaffForm((current) => ({ ...current, password: event.target.value }))
+                    }
+                    minLength={8}
+                    required
+                  />
+                  <select
+                    className="rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
+                    value={staffForm.role}
+                    onChange={(event) =>
+                      setStaffForm((current) => ({ ...current, role: event.target.value as UserRole }))
+                    }
+                  >
+                    <option value="secretary">Secretary</option>
+                    <option value="nurse">Nurse</option>
+                    <option value="doctor">Doctor</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                  <button
+                    type="submit"
+                    className="rounded-lg bg-[#2f2a21] px-3 py-2 text-xs font-semibold text-[#f8f4ec]"
+                    disabled={busy}
+                  >
+                    {busy ? "Creating..." : "Create Account"}
+                  </button>
+                </form>
+              ),
+            })}
 
           {DropdownSection({
             title: "Account",

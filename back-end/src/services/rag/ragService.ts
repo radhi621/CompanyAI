@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { env } from "../../config/env";
 import type { IAIContextChunk, IAIRecordDocument } from "../../models/AIRecord";
 import { geminiClient } from "../llm/geminiClient";
@@ -60,6 +61,16 @@ function chunkText(value: string, chunkSize: number, overlap: number): string[] 
   }
 
   return chunks.filter((chunk) => chunk.length > 0);
+}
+
+// Qdrant only accepts unsigned integers or UUIDs as point IDs, so derive a stable
+// UUID (RFC 4122 v5 layout) from our own key. The original key is kept in the payload.
+function toPointId(key: string): string {
+  const bytes = crypto.createHash("sha1").update(`mediassist:${key}`).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function normalizePointId(pointId: unknown): string {
@@ -184,9 +195,10 @@ export const ragService = {
       wait: true,
       points: [
         {
-          id: record._id.toString(),
+          id: toPointId(`record:${record._id.toString()}`),
           vector: embedding,
           payload: {
+            pointKey: `record:${record._id.toString()}`,
             scope: "patient",
             patientId: record.patientId.toString(),
             recordId: record._id.toString(),
@@ -230,11 +242,13 @@ export const ragService = {
       for (let chunkIndex = 0; chunkIndex < limitedChunks.length; chunkIndex += 1) {
         const chunk = limitedChunks[chunkIndex];
         const embedding = await geminiClient.embedText(truncateText(chunk, MAX_EMBEDDING_TEXT_CHARS));
+        const pointKey = `${input.record._id.toString()}:file:${docIndex}:${chunkIndex}`;
 
         points.push({
-          id: `${input.record._id.toString()}:file:${docIndex}:${chunkIndex}`,
+          id: toPointId(pointKey),
           vector: embedding,
           payload: {
+            pointKey,
             scope: "patient",
             patientId: input.record.patientId.toString(),
             recordId: input.record._id.toString(),
@@ -297,10 +311,13 @@ export const ragService = {
         const chunk = limitedChunks[chunkIndex];
         const embedding = await geminiClient.embedText(truncateText(chunk, MAX_EMBEDDING_TEXT_CHARS));
 
+        const pointKey = `global:${Date.now()}:${docIndex}:${chunkIndex}:${crypto.randomUUID()}`;
+
         points.push({
-          id: `global:${Date.now()}:${docIndex}:${chunkIndex}:${Math.random().toString(36).slice(2, 10)}`,
+          id: toPointId(pointKey),
           vector: embedding,
           payload: {
+            pointKey,
             scope: "global",
             content: chunk,
             sourceLabel: `global_file_${doc.extension.replace(/^\./, "")}`,

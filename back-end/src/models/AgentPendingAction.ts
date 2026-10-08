@@ -17,7 +17,6 @@ export const AGENT_TOOL_NAMES = [
   "list_patient_notes",
   "delete_patient_note",
   "get_day_schedule",
-  "create_staff_account",
   "create_doctor_profile",
   "list_doctors",
   "update_patient",
@@ -40,7 +39,6 @@ export type AgentToolName =
   | "delete_patient_note"
   | "update_patient"
   | "get_day_schedule"
-  | "create_staff_account"
   | "create_doctor_profile"
   | "list_doctors";
 
