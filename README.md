@@ -1,6 +1,7 @@
 # CompanyAI / MediAssist IA
 
 CompanyAI is a full-stack medical operations workspace built around the MediAssist IA assistant. The repository contains a TypeScript Express backend and a Next.js frontend for managing patients, doctors, appointments, AI-assisted records, and agent-driven workflows.
+<img width="2556" height="1396" alt="image" src="https://github.com/user-attachments/assets/47b36b69-e720-4814-a57c-c9684014f368" />
 
 ## Project Structure
 
