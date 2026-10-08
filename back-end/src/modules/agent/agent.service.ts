@@ -1197,7 +1197,7 @@ export const agentService = {
         input.approved
           ? { $set: { status: "approved", approvedAt: new Date() } }
           : { $set: { status: "rejected" } },
-        { new: true },
+        { returnDocument: "after" },
       );
 
       if (!pending) {

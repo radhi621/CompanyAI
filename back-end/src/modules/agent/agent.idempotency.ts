@@ -138,7 +138,7 @@ export const acquireIdempotency = async (
         },
       },
       {
-        new: true,
+        returnDocument: "after",
       },
     );
 
