@@ -115,6 +115,7 @@ npm run dev
 
 ### Auth
 
+- GET /auth/setup-status (public: whether the first admin still needs to be created)
 - POST /auth/bootstrap-admin
 - POST /auth/login
 - POST /auth/refresh

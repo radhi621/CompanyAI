@@ -258,6 +258,15 @@ function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unexpected error";
 }
 
+// For the sign-in and setup screens: drop apiRequest's debugging suffix and explain network failures.
+function readableAuthError(error: unknown): string {
+  const message = extractErrorMessage(error);
+  if (message.startsWith("Network error")) {
+    return `Cannot reach the server at ${API_BASE_URL}. Is the backend running?`;
+  }
+  return message.split(" | HTTP ")[0];
+}
+
 function formatDateTime(value: string | number): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
@@ -872,6 +881,8 @@ export default function Home() {
     email: "",
     password: "",
   });
+  // "needed" only on a fresh install with no admin yet; then the setup screen replaces sign-in.
+  const [setupStatus, setSetupStatus] = useState<"checking" | "needed" | "done">("checking");
   const [loginForm, setLoginForm] = useState({
     email: "",
     password: "",
@@ -1268,7 +1279,11 @@ export default function Home() {
       setCurrentUser(user);
     } catch (error) {
       clearSession();
-      setFeedback(extractErrorMessage(error));
+      // An expired or revoked saved session just leads back to sign-in; only explain other
+      // failures (such as the backend being unreachable).
+      if (!extractErrorMessage(error).includes("| HTTP 401 ")) {
+        setFeedback(readableAuthError(error));
+      }
     }
   }, [apiRequest, claimWorkspace, clearSession, token]);
 
@@ -1345,6 +1360,36 @@ export default function Home() {
     container.scrollTop = container.scrollHeight;
   }, [activeConversation.messages]);
 
+  // Ask the backend whether this is a fresh install, to show either first-run setup or sign-in.
+  useEffect(() => {
+    if (token) {
+      return;
+    }
+
+    let cancelled = false;
+    const timerId = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await fetch(buildApiUrl("/auth/setup-status"), { cache: "no-store" });
+          const payload = (await response.json().catch(() => null)) as ApiEnvelope<{ needsSetup: boolean }> | null;
+          if (!cancelled) {
+            setSetupStatus(response.ok && payload?.data?.needsSetup ? "needed" : "done");
+          }
+        } catch {
+          // Backend unreachable: show sign-in, which reports the connection problem on submit.
+          if (!cancelled) {
+            setSetupStatus("done");
+          }
+        }
+      })();
+    }, 0);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
+  }, [token]);
+
   const handleBootstrapAdmin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setBusy(true);
@@ -1356,10 +1401,20 @@ export default function Home() {
         body: JSON.stringify(bootstrapForm),
       });
 
-      setFeedback("Admin created successfully. You can now log in.");
+      // Sign the new admin straight in instead of making them retype their credentials.
+      const result = await apiRequest<LoginResponse>("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email: bootstrapForm.email, password: bootstrapForm.password }),
+      });
+
+      claimWorkspace(result.user.id);
+      setToken(result.accessToken);
+      setCurrentUser(result.user);
       setBootstrapForm({ bootstrapKey: "", name: "", email: "", password: "" });
+      setSetupStatus("done");
+      setFeedback("Setup complete. Welcome to MediAssist.");
     } catch (error) {
-      setFeedback(extractErrorMessage(error));
+      setFeedback(readableAuthError(error));
     } finally {
       setBusy(false);
     }
@@ -1504,7 +1559,7 @@ export default function Home() {
       setLoginForm({ email: "", password: "" });
       setFeedback("Welcome back.");
     } catch (error) {
-      setFeedback(extractErrorMessage(error));
+      setFeedback(readableAuthError(error));
     } finally {
       setBusy(false);
     }
@@ -1931,31 +1986,53 @@ export default function Home() {
           </section>
 
           <section className="rounded-3xl border border-[#e0d7c8] bg-[#fbf8f1] p-6 shadow-[0_12px_30px_rgba(0,0,0,0.06)]">
-            <div className="grid gap-6">
+            {setupStatus === "checking" && (
+              <p className="py-10 text-center text-sm text-[#7d6a4e]">Connecting to MediAssist...</p>
+            )}
+
+            {setupStatus === "needed" && (
               <form className="grid gap-3" onSubmit={handleBootstrapAdmin}>
-                <h2 className="text-xl font-semibold text-[#2f2a21]">Bootstrap Admin</h2>
-                <input
-                  className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
-                  placeholder="Bootstrap key"
-                  value={bootstrapForm.bootstrapKey}
-                  onChange={(event) =>
-                    setBootstrapForm((current) => ({ ...current, bootstrapKey: event.target.value }))
-                  }
-                  required
-                />
+                <div>
+                  <h2 className="text-xl font-semibold text-[#2f2a21]">Set up MediAssist</h2>
+                  <p className="mt-1 text-sm text-[#645841]">
+                    No administrator exists yet. Create the first admin account to get started; you can add
+                    the rest of your staff from inside the app afterwards.
+                  </p>
+                </div>
+                <label className="grid gap-1 text-sm text-[#5f513a]">
+                  Setup key
+                  <input
+                    className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
+                    type="password"
+                    autoComplete="off"
+                    value={bootstrapForm.bootstrapKey}
+                    onChange={(event) =>
+                      setBootstrapForm((current) => ({ ...current, bootstrapKey: event.target.value }))
+                    }
+                    required
+                  />
+                  <span className="text-xs text-[#8a7c62]">
+                    The <code className="rounded bg-[#efe6d6] px-1">BOOTSTRAP_ADMIN_KEY</code> value from{" "}
+                    <code className="rounded bg-[#efe6d6] px-1">back-end/.env</code>. It proves you control the server
+                    and is only needed this once.
+                  </span>
+                </label>
                 <input
                   className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
                   placeholder="Full name"
+                  autoComplete="name"
                   value={bootstrapForm.name}
                   onChange={(event) =>
                     setBootstrapForm((current) => ({ ...current, name: event.target.value }))
                   }
+                  minLength={2}
                   required
                 />
                 <input
                   className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
                   placeholder="Email"
                   type="email"
+                  autoComplete="email"
                   value={bootstrapForm.email}
                   onChange={(event) =>
                     setBootstrapForm((current) => ({ ...current, email: event.target.value }))
@@ -1964,29 +2041,34 @@ export default function Home() {
                 />
                 <input
                   className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
-                  placeholder="Password"
+                  placeholder="Password (min 8 characters)"
                   type="password"
+                  autoComplete="new-password"
                   value={bootstrapForm.password}
                   onChange={(event) =>
                     setBootstrapForm((current) => ({ ...current, password: event.target.value }))
                   }
+                  minLength={8}
                   required
                 />
                 <button
                   type="submit"
-                  className="rounded-xl bg-[#2f2a21] px-4 py-2 text-sm font-medium text-[#f8f4ec]"
+                  className="rounded-xl bg-[#0f5a4f] px-4 py-2 text-sm font-medium text-white"
                   disabled={busy}
                 >
-                  {busy ? "Processing..." : "Create Admin"}
+                  {busy ? "Setting up..." : "Create admin and sign in"}
                 </button>
               </form>
+            )}
 
+            {setupStatus === "done" && (
               <form className="grid gap-3" onSubmit={handleLogin}>
-                <h2 className="text-xl font-semibold text-[#2f2a21]">Login</h2>
+                <h2 className="text-xl font-semibold text-[#2f2a21]">Sign in</h2>
                 <input
                   className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
                   placeholder="Email"
                   type="email"
+                  autoComplete="username"
                   value={loginForm.email}
                   onChange={(event) =>
                     setLoginForm((current) => ({ ...current, email: event.target.value }))
@@ -1997,6 +2079,7 @@ export default function Home() {
                   className="rounded-xl border border-[#d8cfbe] bg-white px-3 py-2 text-sm"
                   placeholder="Password"
                   type="password"
+                  autoComplete="current-password"
                   value={loginForm.password}
                   onChange={(event) =>
                     setLoginForm((current) => ({ ...current, password: event.target.value }))
@@ -2008,16 +2091,19 @@ export default function Home() {
                   className="rounded-xl bg-[#0f5a4f] px-4 py-2 text-sm font-medium text-white"
                   disabled={busy}
                 >
-                  {busy ? "Signing in..." : "Login"}
+                  {busy ? "Signing in..." : "Sign in"}
                 </button>
-              </form>
-
-              {feedback && (
-                <p className="rounded-xl border border-[#e3d8c6] bg-[#fffdf8] px-3 py-2 text-sm text-[#6e5b40]">
-                  {feedback}
+                <p className="text-xs text-[#8a7c62]">
+                  No account yet? Ask your administrator to create one for you.
                 </p>
-              )}
-            </div>
+              </form>
+            )}
+
+            {feedback && (
+              <p className="mt-4 rounded-xl border border-[#e3d8c6] bg-[#fffdf8] px-3 py-2 text-sm text-[#6e5b40]">
+                {feedback}
+              </p>
+            )}
           </section>
         </div>
       </div>
