@@ -15,7 +15,7 @@ import { UserModel } from "../../models/User";
 import type { AuthUser, UserRole } from "../../types/auth";
 import { ApiError } from "../../utils/apiError";
 import { appointmentsService } from "../appointments/appointments.service";
-import { doctorsService } from "../doctors/doctors.service";
+import { doctorsService, getDoctorTimezone } from "../doctors/doctors.service";
 import { patientNotesService } from "../patients/patientNotes.service";
 import { patientsService } from "../patients/patients.service";
 import { ragService } from "../../services/rag/ragService";
@@ -112,9 +112,9 @@ function truncateResultContent(value: string, maxLength = 1400): string {
   return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
-function parseLocalDateTime(date: string, time: string): DateTime {
+function parseLocalDateTime(date: string, time: string, zone: string = env.APP_TIMEZONE): DateTime {
   const dateTime = DateTime.fromFormat(`${date} ${time}`, "yyyy-MM-dd HH:mm", {
-    zone: env.APP_TIMEZONE,
+    zone,
   });
 
   if (!dateTime.isValid) {
@@ -443,7 +443,9 @@ const toolRegistry = {
       estimatedDurationMinutes: z.coerce.number().int().positive().max(720).optional(),
     }),
     run: async (args, context) => {
-      const requested = parseLocalDateTime(args.date, args.time);
+      // Times are the doctor's local time, matching how their slots are generated.
+      const timezone = await getDoctorTimezone(args.doctorId);
+      const requested = parseLocalDateTime(args.date, args.time, timezone);
 
       const duration = args.estimatedDurationMinutes ?? env.DEFAULT_APPOINTMENT_DURATION_MINUTES;
       const slots = await doctorsService.getAvailableSlots({
@@ -464,7 +466,7 @@ const toolRegistry = {
         doctorId: args.doctorId,
         requestedStartAtLocal: requested.toISO(),
         requestedStartAtUtc: requested.toUTC().toISO(),
-        timezone: env.APP_TIMEZONE,
+        timezone,
         estimatedDurationMinutes: duration,
         isAvailable,
         suggestedSlots: slots.slice(0, 5),
@@ -493,7 +495,7 @@ const toolRegistry = {
       estimatedDurationMinutes: z.coerce.number().int().positive().max(720).optional(),
     }),
     run: async (args, context) => {
-      const localStart = parseLocalDateTime(args.date, args.time);
+      const localStart = parseLocalDateTime(args.date, args.time, await getDoctorTimezone(args.doctorId));
       const appointment = await appointmentsService.create({
         actor: context.actor,
         patientId: args.patientId,

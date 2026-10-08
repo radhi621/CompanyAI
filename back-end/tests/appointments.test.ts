@@ -55,6 +55,15 @@ describe("booking rules", () => {
     expect((await book(secretary, at(9, 15))).status).toBe(409);
   });
 
+  it("does not double-book a patient, even with a different doctor", async () => {
+    const otherDoctorId = (await createDoctor(admin.id))._id.toString();
+    expect((await book(secretary, at(16))).status).toBe(201);
+
+    const clash = await book(secretary, at(16, 15), { doctorId: otherDoctorId });
+    expect(clash.status).toBe(409);
+    expect(clash.body.message).toMatch(/patient/i);
+  });
+
   it("lets only admins book outside working hours", async () => {
     expect((await book(secretary, at(21), { allowOutsideSchedule: true })).status).toBe(403);
     expect((await book(admin, at(21))).status).toBe(400);
