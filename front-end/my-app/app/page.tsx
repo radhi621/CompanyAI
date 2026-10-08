@@ -2,6 +2,7 @@
 
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Calendar from "../components/Calendar";
+import PatientPanel from "../components/PatientPanel";
 
 type UserRole = "admin" | "doctor" | "nurse" | "secretary";
 type PromptMode = "fetch" | "insert";
@@ -2436,6 +2437,20 @@ export default function Home() {
             defaultOpen: false,
             children: (
               <Calendar token={token} refreshAccessToken={refreshAccessToken} />
+            ),
+          })}
+
+          {DropdownSection({
+            title: "Patient Record",
+            subtitle: "Patient details, pathologies and notes",
+            icon: UserIcon(),
+            defaultOpen: false,
+            children: (
+              <PatientPanel
+                request={apiRequest}
+                currentUser={currentUser}
+                preferredPatientId={chatScope === "patient" ? activeFolder?.patientId : null}
+              />
             ),
           })}
 
