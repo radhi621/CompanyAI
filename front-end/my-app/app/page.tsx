@@ -104,6 +104,15 @@ const CHAT_SCOPE_STORAGE_KEY = "mediassist_chat_scope_v1";
 const PATIENT_FOLDERS_STORAGE_KEY = "mediassist_patient_folders_v2";
 const ACTIVE_FOLDER_STORAGE_KEY = "mediassist_active_folder_v2";
 const CONVERSATIONS_STORAGE_KEY = "mediassist_conversations_v2";
+const WORKSPACE_OWNER_STORAGE_KEY = "mediassist_workspace_owner_v1";
+// A 401 from these means bad credentials or an ended session, not an expired access token.
+const NO_REFRESH_PATHS = new Set(["/auth/login", "/auth/refresh", "/auth/logout", "/auth/bootstrap-admin"]);
+const WORKSPACE_STORAGE_KEYS = [
+  CHAT_SCOPE_STORAGE_KEY,
+  PATIENT_FOLDERS_STORAGE_KEY,
+  ACTIVE_FOLDER_STORAGE_KEY,
+  CONVERSATIONS_STORAGE_KEY,
+];
 const GLOBAL_CONVERSATION_ID = "__global__";
 
 const QUICK_ACTIONS: Array<{ title: string; mode: PromptMode; prompt: string }> = [
@@ -1250,6 +1259,75 @@ export default function Home() {
     }
   }, []);
 
+  // Wipes chats and patient folders, which can contain patient data.
+  const resetWorkspace = useCallback(() => {
+    setConversations({
+      [GLOBAL_CONVERSATION_ID]: getEmptyConversation(),
+    });
+    setFolders([]);
+    setActiveFolderId(null);
+    setChatScope("global");
+
+    if (typeof window !== "undefined") {
+      WORKSPACE_STORAGE_KEYS.forEach((key) => window.localStorage.removeItem(key));
+    }
+  }, []);
+
+  // Saved chats belong to the user who created them; a different user starts clean.
+  const claimWorkspace = useCallback(
+    (userId: string) => {
+      if (typeof window === "undefined") {
+        return;
+      }
+
+      const owner = window.localStorage.getItem(WORKSPACE_OWNER_STORAGE_KEY);
+      if (owner && owner !== userId) {
+        resetWorkspace();
+      }
+
+      window.localStorage.setItem(WORKSPACE_OWNER_STORAGE_KEY, userId);
+    },
+    [resetWorkspace],
+  );
+
+  const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
+
+  // Exchanges the httpOnly refresh cookie for a new access token. Concurrent callers
+  // share one request, because the backend rotates (and revokes) the refresh token.
+  const refreshAccessToken = useCallback((): Promise<string | null> => {
+    if (!refreshPromiseRef.current) {
+      refreshPromiseRef.current = (async () => {
+        try {
+          const response = await fetch(buildApiUrl("/auth/refresh"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+            credentials: "include",
+            cache: "no-store",
+          });
+
+          if (!response.ok) {
+            return null;
+          }
+
+          const payload = (await response.json().catch(() => null)) as ApiEnvelope<LoginResponse> | null;
+          const nextToken = payload?.data?.accessToken ?? null;
+          if (nextToken) {
+            setToken(nextToken);
+          }
+
+          return nextToken;
+        } catch {
+          return null;
+        } finally {
+          refreshPromiseRef.current = null;
+        }
+      })();
+    }
+
+    return refreshPromiseRef.current;
+  }, []);
+
   const apiRequest = useCallback(
     async <T,>(
       path: string,
@@ -1257,38 +1335,53 @@ export default function Home() {
         idempotencyKey?: string;
       },
     ): Promise<T> => {
-      const headers = new Headers(options?.headers ?? {});
-
-      if (token) {
-        headers.set("Authorization", `Bearer ${token}`);
-      }
-
       const isFormDataBody =
         typeof FormData !== "undefined" && options?.body instanceof FormData;
 
-      if (options?.body && !isFormDataBody && !headers.has("Content-Type")) {
-        headers.set("Content-Type", "application/json");
-      }
+      const buildHeaders = (accessToken: string | null): Headers => {
+        const headers = new Headers(options?.headers ?? {});
 
-      if (options?.idempotencyKey) {
-        headers.set("Idempotency-Key", options.idempotencyKey);
-      }
+        if (accessToken) {
+          headers.set("Authorization", `Bearer ${accessToken}`);
+        }
+
+        if (options?.body && !isFormDataBody && !headers.has("Content-Type")) {
+          headers.set("Content-Type", "application/json");
+        }
+
+        if (options?.idempotencyKey) {
+          headers.set("Idempotency-Key", options.idempotencyKey);
+        }
+
+        return headers;
+      };
 
       const requestMethod = options?.method ?? "GET";
       const requestUrl = buildApiUrl(path);
 
-      let response: Response;
-      try {
-        response = await fetch(requestUrl, {
-          ...options,
-          headers,
-          credentials: "include",
-          cache: "no-store",
-        });
-      } catch (error) {
-        throw new Error(
-          `Network error for ${requestMethod} ${requestUrl}: ${extractErrorMessage(error)}`,
-        );
+      const send = async (accessToken: string | null): Promise<Response> => {
+        try {
+          return await fetch(requestUrl, {
+            ...options,
+            headers: buildHeaders(accessToken),
+            credentials: "include",
+            cache: "no-store",
+          });
+        } catch (error) {
+          throw new Error(
+            `Network error for ${requestMethod} ${requestUrl}: ${extractErrorMessage(error)}`,
+          );
+        }
+      };
+
+      let response = await send(token);
+
+      // Access tokens last 15 minutes: refresh once and retry instead of logging out.
+      if (response.status === 401 && token && !NO_REFRESH_PATHS.has(path)) {
+        const refreshedToken = await refreshAccessToken();
+        if (refreshedToken) {
+          response = await send(refreshedToken);
+        }
       }
 
       const payload = (await response.json().catch(() => null)) as ApiEnvelope<T> | null;
@@ -1312,7 +1405,7 @@ export default function Home() {
 
       return payload.data;
     },
-    [clearSession, token],
+    [clearSession, refreshAccessToken, token],
   );
 
   const loadCurrentUser = useCallback(async () => {
@@ -1322,12 +1415,13 @@ export default function Home() {
 
     try {
       const user = await apiRequest<AuthUser>("/auth/me");
+      claimWorkspace(user.id);
       setCurrentUser(user);
     } catch (error) {
       clearSession();
       setFeedback(extractErrorMessage(error));
     }
-  }, [apiRequest, clearSession, token]);
+  }, [apiRequest, claimWorkspace, clearSession, token]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1453,6 +1547,7 @@ export default function Home() {
         body: JSON.stringify(loginForm),
       });
 
+      claimWorkspace(result.user.id);
       setToken(result.accessToken);
       setCurrentUser(result.user);
       setLoginForm({ email: "", password: "" });
@@ -1476,6 +1571,10 @@ export default function Home() {
       // Ignore logout errors and clear local session anyway.
     } finally {
       clearSession();
+      resetWorkspace();
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem(WORKSPACE_OWNER_STORAGE_KEY);
+      }
       setBusy(false);
     }
   };
@@ -2219,7 +2318,7 @@ export default function Home() {
             icon: CalendarIcon(),
             defaultOpen: false,
             children: (
-              <Calendar token={token} />
+              <Calendar token={token} refreshAccessToken={refreshAccessToken} />
             ),
           })}
 
