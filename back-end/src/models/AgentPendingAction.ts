@@ -54,7 +54,7 @@ export interface IAgentPendingActionDocument extends Document {
   actorRole: UserRole;
   prompt: string;
   toolCalls: IAgentToolCall[];
-  status: "pending" | "approved" | "executed" | "rejected";
+  status: "pending" | "approved" | "executed" | "rejected" | "failed";
   expiresAt: Date;
   approvedAt?: Date;
   executedAt?: Date;
@@ -107,7 +107,7 @@ const agentPendingActionSchema = new Schema<IAgentPendingActionDocument>(
     },
     status: {
       type: String,
-      enum: ["pending", "approved", "executed", "rejected"],
+      enum: ["pending", "approved", "executed", "rejected", "failed"],
       required: true,
       default: "pending",
       index: true,
