@@ -104,6 +104,13 @@ Open the frontend at `http://localhost:3000` and the backend API at `http://loca
 - `npm run build` - compile TypeScript
 - `npm run start` - run the compiled server
 - `npm run typecheck` - run TypeScript validation
+- `npm test` - run the backend test suite (`npm run test:watch` to re-run on changes)
+
+### Backend tests
+
+The tests (Vitest + Supertest, in `back-end/tests/`) exercise the API against a real MongoDB, so start the database first with `docker compose up -d`. They use a separate database named `mediassist_test` on the Docker port (picked up from `MONGO_PORT` in the root `.env`), and refuse to run against any database whose name does not end in `_test`. Set `TEST_MONGODB_URI` to use a different instance.
+
+Gemini, Groq and Qdrant are stubbed, and the test environment uses dummy keys, so tests never call external services or use your API quota.
 
 ## Frontend Scripts
 

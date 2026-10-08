@@ -8,7 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "echo \"No tests configured yet\""
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "author": "",
   "license": "ISC",
@@ -46,9 +47,11 @@
     "@types/multer": "^2.1.0",
     "@types/node": "^25.6.0",
     "@types/pdf-parse": "^1.1.5",
+    "@types/supertest": "^7.2.1",
     "@types/swagger-ui-express": "^4.1.8",
-    "ts-node-dev": "^2.0.0",
+    "supertest": "^7.3.1",
     "tsx": "^4.21.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.3"
   }
 }

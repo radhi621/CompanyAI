@@ -218,7 +218,7 @@ export const doctorsService = {
       },
       {
         upsert: true,
-        new: true,
+        returnDocument: "after",
       },
     );
 
