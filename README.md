@@ -1,4 +1,3 @@
-
 # CompanyAI / MediAssist IA
 
 CompanyAI is a full-stack medical operations workspace built around the MediAssist IA assistant. The repository contains a TypeScript Express backend and a Next.js frontend for managing patients, doctors, appointments, AI-assisted records, and agent-driven workflows.
@@ -22,12 +21,28 @@ CompanyAI is a full-stack medical operations workspace built around the MediAssi
 ## Prerequisites
 
 - Node.js 20 or newer
-- MongoDB running locally
+- Docker (for the local MongoDB container), or MongoDB installed natively
 - Qdrant running locally or remotely
 - Gemini API key
 - Groq API key
 
 ## Setup
+
+### 0. Database (MongoDB in Docker)
+
+From the repository root:
+
+```bash
+docker compose up -d     # create/start MongoDB (data persists in the companyai-mongo-data volume)
+docker compose stop      # pause it
+docker compose start     # resume it
+docker compose down      # remove the container (data is kept)
+docker compose down -v   # remove the container AND delete all data
+```
+
+Open a shell on the database with `docker exec -it companyai-mongo mongosh medical`.
+
+MongoDB is exposed on `127.0.0.1:27017` by default. If that port is already taken (for example by a native MongoDB service), create a root `.env` file with `MONGO_PORT=27018` and use that port in `MONGODB_URI`.
 
 ### 1. Backend environment
 
