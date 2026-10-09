@@ -28,4 +28,11 @@ aiRoutes.get("/records", aiController.listRecords);
 aiRoutes.get("/records/:recordId", aiController.getRecordById);
 aiRoutes.patch("/records/:recordId", ensureAIRecordOwnerOrHigher, aiController.updateRecord);
 aiRoutes.delete("/records/:recordId", ensureAIRecordOwnerOrHigher, aiController.deleteRecord);
+// Permission is checked before the files are read.
+aiRoutes.post(
+	"/records/:recordId/replace",
+	ensureAIRecordOwnerOrHigher,
+	aiRecordUpload.array("files", 8),
+	aiController.replaceRecordFiles,
+);
 aiRoutes.post("/records/:recordId/restore", authorize("admin"), aiController.restoreRecord);
