@@ -204,3 +204,14 @@ export function getConversationKey(scope: ChatScope, activeFolderId: string | nu
 
   return activeFolderId;
 }
+
+// Limits enforced by the backend's /agent/execute validation.
+export const MAX_HISTORY_TURNS = 100;
+export const MAX_HISTORY_TEXT_LENGTH = 8000;
+
+/** Earlier messages sent with a prompt: the most recent turns, each trimmed to the backend's limit. */
+export function buildAgentHistory(messages: ChatMessage[]): Array<{ role: MessageRole; text: string }> {
+  return messages
+    .slice(-MAX_HISTORY_TURNS)
+    .map((message) => ({ role: message.role, text: message.text.slice(0, MAX_HISTORY_TEXT_LENGTH) }));
+}
