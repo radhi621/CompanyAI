@@ -21,19 +21,18 @@ CompanyAI is a full-stack medical operations workspace built around the MediAssi
 ## Prerequisites
 
 - Node.js 20 or newer
-- Docker (for the local MongoDB container), or MongoDB installed natively
-- Qdrant running locally or remotely
+- Docker (for the local MongoDB and Qdrant containers), or both installed natively
 - Gemini API key
 - Groq API key
 
 ## Setup
 
-### 0. Database (MongoDB in Docker)
+### 0. Databases (MongoDB and Qdrant in Docker)
 
 From the repository root:
 
 ```bash
-docker compose up -d     # create/start MongoDB (data persists in the companyai-mongo-data volume)
+docker compose up -d     # create/start MongoDB and Qdrant (data persists in the companyai-mongo-data and companyai-qdrant-data volumes)
 docker compose stop      # pause it
 docker compose start     # resume it
 docker compose down      # remove the container (data is kept)
@@ -44,6 +43,8 @@ Open a shell on the database with `docker exec -it companyai-mongo mongosh medic
 
 MongoDB is exposed on `127.0.0.1:27017` by default. If that port is already taken (for example by a native MongoDB service), create a root `.env` file with `MONGO_PORT=27018` and use that port in `MONGODB_URI`.
 
+Qdrant (the vector database used for RAG search) is exposed on `127.0.0.1:6333` (change it with `QDRANT_PORT` in the root `.env`). Its dashboard is at http://localhost:6333/dashboard. The collection is created automatically on the first upload. It has no API key, so leave `QDRANT_API_KEY` empty; it is only reachable from this machine. Embeddings still come from Gemini, so `GEMINI_API_KEY` is required for uploads and search.
+
 ### 1. Backend environment
 
 Create `back-end/.env` from `back-end/.env.example` and set your values.
@@ -52,6 +53,7 @@ Use a local MongoDB URI, for example:
 
 ```bash
 MONGODB_URI=mongodb://127.0.0.1:27017/medical
+QDRANT_URL=http://localhost:6333
 ```
 
 Other required backend values include JWT secrets, `BOOTSTRAP_ADMIN_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, and `QDRANT_URL`.
