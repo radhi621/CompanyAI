@@ -1,6 +1,7 @@
 "use client";
 
 import type { Dispatch, FormEvent, RefObject, SetStateAction } from "react";
+import MarkdownMessage from "./MarkdownMessage";
 import type { ChatScope, ChatSession, PatientFolder, PromptMode } from "../lib/types";
 import { formatDateTime, messageBubbleClass } from "../lib/utils";
 import { ControlsIcon, FetchIcon, InsertIcon, QuickActionsIcon, ToolLimitIcon, quickActionIcon } from "../components/icons";
@@ -99,7 +100,12 @@ export default function ChatPanel({
         {activeConversation.messages.map((message) => (
           <article key={message.id} className="space-y-2">
             <div className={messageBubbleClass(message.role)}>
-              <p className="whitespace-pre-wrap break-words text-sm leading-6">{message.text}</p>
+              {message.role === "user" ? (
+                // What the user typed is shown as-is.
+                <p className="whitespace-pre-wrap break-words text-sm leading-6">{message.text}</p>
+              ) : (
+                <MarkdownMessage text={message.text} />
+              )}
             </div>
             <div className="px-1 text-[11px] text-[#8f8167]">
               {new Date(message.createdAt).toLocaleTimeString()}
