@@ -58,6 +58,7 @@ jobs:
         run: npm test
 
   frontend:
+    # The job name is a required check in branch protection: renaming it blocks merges.
     name: Frontend (lint + typecheck + build)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -82,6 +83,9 @@ jobs:
 
       - name: Typecheck
         run: npx tsc --noEmit
+
+      - name: Run tests
+        run: npm test
 
       - name: Build
         run: npm run build
