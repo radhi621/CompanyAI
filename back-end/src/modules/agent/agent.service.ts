@@ -366,7 +366,18 @@ function buildSynthesisPrompt(actor: AuthUser, prompt: string, results: Executed
     `Requester role: ${actor.role}`,
     "Write a precise, concise summary focused only on the data returned. Present facts directly — no introductions, no conclusions, no fluff.",
     "Do not explain what you did or how you searched. Just state the results.",
-    "If there are items (notes, appointments, patients), list them with their key fields in a compact format.",
+    "Format the answer in Markdown; the chat renders bold text, lists and tables.",
+    [
+      "When the results contain two or more records (patients, appointments, notes, doctors, users),",
+      "present them as a Markdown table: one row per record, human-readable columns first",
+      "(patients: Name, CIN, Date of birth, Phone, Pathologies; appointments: Date, Time, Patient, Doctor, Reason, Status;",
+      "notes: Date, Author, Note; doctors: Name, Specialty, Active),",
+      "and the record's full ID as the last column, written in backticks (e.g. `6ac7f8e295fc5deac8262ee7`).",
+      "Never shorten IDs: follow-up requests rely on them.",
+    ].join(" "),
+    "Use a dash (—) for missing values, dates as YYYY-MM-DD, and keep cell text short.",
+    "A single record can be shown as a short bold-labelled list instead of a table.",
+    "Start with a one-line count or summary (e.g. 'Total patients: 5'), then the table.",
     "If nothing was found, say so in one sentence.",
   ];
 
