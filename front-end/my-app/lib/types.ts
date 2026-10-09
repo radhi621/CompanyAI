@@ -96,3 +96,12 @@ export type ConversationMap = Record<string, ConversationState>;
 
 /** Authenticated request helper provided by the page (adds the token, refreshes on 401). */
 export type ApiRequest = <T>(path: string, options?: RequestInit & { idempotencyKey?: string }) => Promise<T>;
+
+/** Per-folder chat statistics shown in the sidebar. */
+export interface FolderStats {
+  folderId: string;
+  totalMessages: number;
+  sessionCount: number;
+  lastMessageAt: number | undefined;
+  sessions: Array<{ id: string; messageCount: number; lastMessageAt: number | undefined; isActive: boolean }>;
+}

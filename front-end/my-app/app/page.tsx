@@ -4,13 +4,15 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import Calendar from "../components/Calendar";
 import AccountPanel from "../components/AccountPanel";
 import AuthScreen from "../components/AuthScreen";
+import ChatPanel from "../components/ChatPanel";
+import ChatScopeSection from "../components/ChatScopeSection";
 import PatientPanel from "../components/PatientPanel";
 import RagUploadPanel from "../components/RagUploadPanel";
 import StaffAccountsPanel from "../components/StaffAccountsPanel";
-import type { AgentConfirmResult, AgentExecutionResult, ApiEnvelope, AuthUser, ChatMessage, ChatScope, ChatSession, ConversationMap, LoginResponse, PatientFolder, PendingActionState, PromptMode } from "../lib/types";
+import type { AgentConfirmResult, AgentExecutionResult, ApiEnvelope, AuthUser, ChatMessage, ChatScope, ChatSession, ConversationMap, FolderStats, LoginResponse, PatientFolder, PendingActionState, PromptMode } from "../lib/types";
 import { ACTIVE_FOLDER_STORAGE_KEY, CHAT_SCOPE_STORAGE_KEY, CONVERSATIONS_STORAGE_KEY, GLOBAL_CONVERSATION_ID, NO_REFRESH_PATHS, PATIENT_FOLDERS_STORAGE_KEY, QUICK_ACTIONS, TOKEN_STORAGE_KEY, WORKSPACE_OWNER_STORAGE_KEY, WORKSPACE_STORAGE_KEYS, buildApiUrl } from "../lib/config";
-import { buildPromptWithMode, createId, extractErrorMessage, formatApiErrorMessage, formatDateTime, messageBubbleClass, readableAuthError, sanitizeToolCalls, summarizeConfirmResult, summarizeExecutionResult } from "../lib/utils";
-import { CalendarIcon, ControlsIcon, FetchIcon, InsertIcon, QuickActionsIcon, ScopeIcon, ToolLimitIcon, UploadIcon, UserIcon, quickActionIcon } from "../components/icons";
+import { buildPromptWithMode, createId, extractErrorMessage, formatApiErrorMessage, readableAuthError, sanitizeToolCalls, summarizeConfirmResult, summarizeExecutionResult } from "../lib/utils";
+import { CalendarIcon, ScopeIcon, UploadIcon, UserIcon } from "../components/icons";
 import { DropdownSection } from "../components/DropdownSection";
 import { createSession, ensureConversation, getConversationKey, getEmptyConversation, parseStoredConversations, parseStoredFolders } from "../lib/conversations";
 
@@ -108,14 +110,6 @@ export default function Home() {
   );
 
   const quickActions = useMemo(() => QUICK_ACTIONS, []);
-
-  interface FolderStats {
-    folderId: string;
-    totalMessages: number;
-    sessionCount: number;
-    lastMessageAt: number | undefined;
-    sessions: Array<{ id: string; messageCount: number; lastMessageAt: number | undefined; isActive: boolean }>;
-  }
 
   const folderStats: FolderStats[] = useMemo(() => {
     return folders.map((folder) => {
@@ -911,217 +905,24 @@ export default function Home() {
             icon: ScopeIcon(),
             defaultOpen: true,
             children: (
-              <>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setChatScope("global")}
-                    className={`rounded-lg px-2 py-2 text-xs font-semibold ${
-                      chatScope === "global"
-                        ? "bg-[#2f2a21] text-[#f8f4ec]"
-                        : "border border-[#d2c6b1] bg-[#f7f0e4] text-[#665a44]"
-                    }`}
-                  >
-                    Global Chat
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setChatScope("patient")}
-                    className={`rounded-lg px-2 py-2 text-xs font-semibold ${
-                      chatScope === "patient"
-                        ? "bg-[#2f2a21] text-[#f8f4ec]"
-                        : "border border-[#d2c6b1] bg-[#f7f0e4] text-[#665a44]"
-                    }`}
-                  >
-                    Patient Chat
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleNewChat}
-                  className="mt-2 w-full rounded-lg border border-[#cfc2ab] bg-[#fbf7ef] px-3 py-2 text-left text-xs font-medium hover:bg-[#fffaf3]"
-                >
-                  + New Chat In Current Scope
-                </button>
-
-                {chatScope === "global" && (() => {
-                  const globalConv = conversations[GLOBAL_CONVERSATION_ID];
-                  const globalSessions = globalConv ? Object.values(globalConv.sessions) : [];
-                  return globalSessions.length > 1 ? (
-                    <div className="mt-2 rounded-lg border border-[#d9ceb9] bg-[#faf6ee] px-2 py-2">
-                      <details>
-                        <summary className="cursor-pointer text-[10px] text-[#7c6e55]">
-                          Global Sessions ({globalSessions.length})
-                        </summary>
-                        <div className="mt-1 space-y-1">
-                          {globalSessions.map((session) => (
-                            <div key={session.id} className="flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={() => handleSwitchSession(GLOBAL_CONVERSATION_ID, session.id)}
-                                className={`flex-1 rounded px-2 py-1 text-left text-[10px] ${
-                                  session.id === globalConv?.activeSessionId
-                                    ? "bg-[#e0d5c0] font-semibold text-[#2f2a21]"
-                                    : "text-[#6a5b43] hover:bg-[#efeadc]"
-                                }`}
-                              >
-                                {session.messages.length} msg{session.messages.length !== 1 ? "s" : ""}
-                                {session.messages.length > 0
-                                  ? ` | ${formatDateTime(session.messages[session.messages.length - 1].createdAt)}`
-                                  : " | empty"}
-                                {session.id === globalConv?.activeSessionId ? " (active)" : ""}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteSession(GLOBAL_CONVERSATION_ID, session.id)}
-                                className="rounded px-1 py-1 text-[10px] text-[#7f3f3f] hover:bg-[#fff1ef]"
-                                title="Delete session"
-                              >
-                                ✕
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    </div>
-                  ) : null;
-                })()}
-
-                {chatScope === "patient" && (
-                  <>
-                    <div className="mt-3 rounded-lg border border-[#dacfbf] bg-[#fffdf7] p-2">
-                      <button
-                        type="button"
-                        onClick={() => setShowFolderForm((current) => !current)}
-                        className="w-full rounded-md border border-[#d2c6b1] px-2 py-2 text-[11px] font-medium text-[#6a5b43] hover:bg-[#fff8ed]"
-                      >
-                        {showFolderForm ? "Hide Create Form" : "Create Patient Folder"}
-                      </button>
-
-                      {showFolderForm && (
-                        <form className="mt-2 grid gap-2" onSubmit={handleCreateFolder}>
-                          <input
-                            className="rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
-                            placeholder="Folder name"
-                            value={newFolderForm.name}
-                            onChange={(event) =>
-                              setNewFolderForm((current) => ({ ...current, name: event.target.value }))
-                            }
-                            required
-                          />
-                          <input
-                            className="rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
-                            placeholder="Patient ID (ObjectId)"
-                            value={newFolderForm.patientId}
-                            onChange={(event) =>
-                              setNewFolderForm((current) => ({ ...current, patientId: event.target.value }))
-                            }
-                            required
-                          />
-                          <button
-                            type="submit"
-                            className="rounded-lg bg-[#2f2a21] px-3 py-2 text-xs font-semibold text-[#f8f4ec]"
-                          >
-                            Create Folder
-                          </button>
-                        </form>
-                      )}
-                    </div>
-
-                    <div className="mt-2 max-h-[250px] space-y-2 overflow-y-auto pr-1">
-                      {folders.length === 0 && (
-                        <p className="rounded-lg border border-dashed border-[#d8ccb6] px-2 py-2 text-xs text-[#8a7c62]">
-                          No patient folders yet.
-                        </p>
-                      )}
-
-                      {folders.map((folder) => {
-                        const stats = folderStats.find((entry) => entry.folderId === folder.id);
-                        const isActive = folder.id === activeFolderId;
-
-                        return (
-                          <div
-                            key={folder.id}
-                            className={`rounded-lg border px-2 py-2 ${
-                              isActive
-                                ? "border-[#baab8f] bg-[#fff8ed]"
-                                : "border-[#d9ceb9] bg-[#faf6ee]"
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setActiveFolderId(folder.id);
-                                setChatScope("patient");
-                              }}
-                              className="w-full text-left"
-                            >
-                              <p className="text-xs font-semibold text-[#3c3327]">{folder.name}</p>
-                              <p className="mt-1 break-all text-[10px] text-[#7c6e55]">{folder.patientId}</p>
-                              <p className="mt-1 text-[10px] text-[#8e7f63]">
-                                {stats?.totalMessages ?? 0} messages across {stats?.sessionCount ?? 1} session(s)
-                                {stats?.lastMessageAt ? ` | ${formatDateTime(stats.lastMessageAt)}` : ""}
-                              </p>
-                            </button>
-
-                            {stats && stats.sessions.length > 1 && (
-                              <details className="mt-1">
-                                <summary className="cursor-pointer text-[10px] text-[#7c6e55]">
-                                  Sessions ({stats.sessions.length})
-                                </summary>
-                                <div className="mt-1 space-y-1">
-                                  {stats.sessions.map((session) => (
-                                    <div
-                                      key={session.id}
-                                      className="flex items-center gap-1"
-                                    >
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          setActiveFolderId(folder.id);
-                                          setChatScope("patient");
-                                          handleSwitchSession(folder.id, session.id);
-                                        }}
-                                        className={`flex-1 rounded px-2 py-1 text-left text-[10px] ${
-                                          session.isActive
-                                            ? "bg-[#e0d5c0] font-semibold text-[#2f2a21]"
-                                            : "text-[#6a5b43] hover:bg-[#efeadc]"
-                                        }`}
-                                      >
-                                        {session.messageCount} msg{session.messageCount !== 1 ? "s" : ""}
-                                        {session.lastMessageAt
-                                          ? ` | ${formatDateTime(session.lastMessageAt)}`
-                                          : " | empty"}
-                                        {session.isActive ? " (active)" : ""}
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleDeleteSession(folder.id, session.id)}
-                                        className="rounded px-1 py-1 text-[10px] text-[#7f3f3f] hover:bg-[#fff1ef]"
-                                        title="Delete session"
-                                      >
-                                        ✕
-                                      </button>
-                                    </div>
-                                  ))}
-                                </div>
-                              </details>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteFolder(folder.id)}
-                              className="mt-1 rounded-md border border-[#d6c8b1] px-2 py-1 text-[10px] font-medium text-[#7f3f3f] hover:bg-[#fff1ef]"
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </>
-                )}
-              </>
+              <ChatScopeSection
+                chatScope={chatScope}
+                setChatScope={setChatScope}
+                conversations={conversations}
+                folders={folders}
+                folderStats={folderStats}
+                activeFolderId={activeFolderId}
+                setActiveFolderId={setActiveFolderId}
+                showFolderForm={showFolderForm}
+                setShowFolderForm={setShowFolderForm}
+                newFolderForm={newFolderForm}
+                setNewFolderForm={setNewFolderForm}
+                handleCreateFolder={handleCreateFolder}
+                handleDeleteFolder={handleDeleteFolder}
+                handleDeleteSession={handleDeleteSession}
+                handleSwitchSession={handleSwitchSession}
+                handleNewChat={handleNewChat}
+              />
             ),
           })}
 
@@ -1200,224 +1001,27 @@ export default function Home() {
           })}
         </aside>
 
-        <section className="flex min-w-0 flex-1 flex-col rounded-2xl border border-[#ddd2bf] bg-[#faf7f0] shadow-[0_6px_18px_rgba(0,0,0,0.05)]">
-          <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[#e2d8c7] px-4 py-3">
-            <div>
-              <p className="text-xs uppercase tracking-[0.14em] text-[#8e7f63]">MediAssist Conversation</p>
-              <h1 className="text-lg font-semibold text-[#2f2a21]">
-                {chatScope === "global" ? "Global AI Chat" : "Patient Folder AI Chat"}
-              </h1>
-              {chatScope === "global" ? (
-                <p className="mt-1 text-xs text-[#6f6148]">Using Global Knowledge RAG by default.</p>
-              ) : activeFolder ? (
-                <p className="mt-1 text-xs text-[#6f6148]">
-                  Folder: <span className="font-semibold">{activeFolder.name}</span> | Patient ID: {" "}
-                  <span className="font-semibold">{activeFolder.patientId}</span>
-                </p>
-              ) : (
-                <p className="mt-1 text-xs text-[#8c6a38]">
-                  Select a patient folder to use patient-scoped context.
-                </p>
-              )}
-            </div>
-          </header>
-
-          {feedback && (
-            <div className="border-b border-[#eadfce] bg-[#fff9ee] px-4 py-2 text-sm text-[#745f3e]">{feedback}</div>
-          )}
-
-          <div ref={chatContainerRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6">
-            {activeConversation.messages.length === 0 && (
-              <div className="mx-auto mt-8 max-w-3xl rounded-2xl border border-[#dfd3bf] bg-white/80 p-6 text-center">
-                <h2 className="text-2xl font-semibold text-[#2f2a21]">
-                  {chatScope === "global"
-                    ? "Ask using global context"
-                    : activeFolder
-                      ? `Ask about ${activeFolder.name}`
-                      : "Select a patient folder first"}
-                </h2>
-                <p className="mt-2 text-sm text-[#6f6148]">
-                  {chatScope === "global"
-                    ? "This chat uses Global RAG knowledge by default."
-                    : activeFolder
-                      ? "This chat uses patient RAG first, then falls back to global RAG when needed."
-                      : "Create or choose a patient folder in the left panel to continue."}
-                </p>
-              </div>
-            )}
-
-            {activeConversation.messages.map((message) => (
-              <article key={message.id} className="space-y-2">
-                <div className={messageBubbleClass(message.role)}>
-                  <p className="whitespace-pre-wrap break-words text-sm leading-6">{message.text}</p>
-                </div>
-                <div className="px-1 text-[11px] text-[#8f8167]">
-                  {new Date(message.createdAt).toLocaleTimeString()}
-                </div>
-                {message.raw !== undefined && (
-                  <details className="rounded-xl border border-[#e4dac9] bg-[#fffdf9] p-2 text-xs text-[#5f523d]">
-                    <summary className="cursor-pointer select-none">Technical details (JSON)</summary>
-                    <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words">
-                      {JSON.stringify(message.raw, null, 2)}
-                    </pre>
-                  </details>
-                )}
-              </article>
-            ))}
-          </div>
-
-          {activePendingAction && (
-            <div className="border-t border-[#e3d8c8] bg-[#fff6e6] px-4 py-3">
-              <p className="text-sm font-medium text-[#6f4a00]">Pending destructive action</p>
-              <p className="mt-1 text-xs text-[#7d6440]">
-                ID: {activePendingAction.id}
-                {activePendingAction.expiresAt
-                  ? ` | Expires: ${formatDateTime(activePendingAction.expiresAt)}`
-                  : ""}
-              </p>
-              {activePendingAction.plannedToolCalls.length > 0 && (
-                <p className="mt-1 text-xs text-[#7d6440]">
-                  Planned tools: {activePendingAction.plannedToolCalls.map((call) => call.tool).join(", ")}
-                </p>
-              )}
-              <div className="mt-3 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void handleConfirmPendingAction(true)}
-                  className="rounded-lg bg-[#166534] px-3 py-2 text-xs font-semibold text-white"
-                  disabled={busy}
-                >
-                  Approve
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleConfirmPendingAction(false)}
-                  className="rounded-lg bg-[#8a1c1c] px-3 py-2 text-xs font-semibold text-white"
-                  disabled={busy}
-                >
-                  Reject
-                </button>
-              </div>
-            </div>
-          )}
-
-          <footer className="border-t border-[#e2d8c7] p-2 sm:p-2.5">
-            <form className="space-y-2" onSubmit={handleSendPrompt}>
-              <div className="relative rounded-2xl border border-[#d6cab5] bg-white p-2.5 shadow-[0_4px_10px_rgba(0,0,0,0.04)]">
-                <textarea
-                  value={promptInput}
-                  onChange={(event) => setPromptInput(event.target.value)}
-                  placeholder={
-                    chatScope === "global"
-                      ? "Message MediAssist globally..."
-                      : activeFolder
-                        ? `Message MediAssist for ${activeFolder.name}...`
-                        : "Select a patient folder first..."
-                  }
-                  className="min-h-[52px] w-full resize-y border-0 bg-transparent text-sm leading-6 text-[#2f2a21] outline-none"
-                  disabled={!canSendPrompt}
-                />
-
-                <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 border-t border-[#eee6d8] pt-1.5">
-                  <div className="flex items-center gap-1.5">
-                    <details className="group relative">
-                      <summary className="flex h-8 w-8 cursor-pointer list-none items-center justify-center rounded-lg border border-[#d9ceb9] bg-[#faf6ee] text-[#6c5e47] hover:bg-white [&::-webkit-details-marker]:hidden">
-                        {ControlsIcon()}
-                        <span className="sr-only">Open main controls</span>
-                      </summary>
-                      <div className="absolute bottom-full left-0 z-20 mb-1.5 w-[270px] rounded-xl border border-[#d8ccb6] bg-[#fffaf1] p-2.5 shadow-[0_8px_20px_rgba(0,0,0,0.08)]">
-                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#7e7058]">
-                          Main Controls
-                        </p>
-                        <div className="mt-2 inline-flex rounded-lg border border-[#d2c6b1] bg-[#f6f0e4] p-0.5 text-[11px]">
-                          <button
-                            type="button"
-                            onClick={() => setPromptMode("fetch")}
-                            className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${
-                              promptMode === "fetch" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
-                            }`}
-                          >
-                            {FetchIcon()}
-                            Fetch
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setPromptMode("insert")}
-                            className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${
-                              promptMode === "insert" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
-                            }`}
-                          >
-                            {InsertIcon()}
-                            Insert
-                          </button>
-                        </div>
-                        <label className="mt-2 inline-flex w-full items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#7e7058]">
-                          {ToolLimitIcon()}
-                          Tool Calls
-                          <select
-                            value={maxToolCalls}
-                            onChange={(event) => setMaxToolCalls(Number(event.target.value))}
-                            className="ml-auto rounded-md border border-[#d4c8b3] bg-white px-2 py-1 text-[11px] text-[#2f2a21]"
-                          >
-                            <option value={1}>1</option>
-                            <option value={2}>2</option>
-                            <option value={3}>3</option>
-                            <option value={4}>4</option>
-                            <option value={5}>5</option>
-                          </select>
-                        </label>
-                      </div>
-                    </details>
-
-                    <details className="group relative">
-                      <summary className="flex h-8 w-8 cursor-pointer list-none items-center justify-center rounded-lg border border-[#d9ceb9] bg-[#faf6ee] text-[#6c5e47] hover:bg-white [&::-webkit-details-marker]:hidden">
-                        {QuickActionsIcon()}
-                        <span className="sr-only">Open quick actions</span>
-                      </summary>
-                      <div className="absolute bottom-full left-0 z-20 mb-1.5 w-[min(78vw,380px)] rounded-xl border border-[#d8ccb6] bg-[#fffaf1] p-2.5 shadow-[0_8px_20px_rgba(0,0,0,0.08)]">
-                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#7e7058]">
-                          Quick Actions
-                        </p>
-                        <div className="mt-2 flex max-h-[180px] flex-wrap gap-1.5 overflow-y-auto pr-1">
-                          {quickActions.map((item) => (
-                            <button
-                              key={item.title}
-                              type="button"
-                              onClick={() => handleQuickAction(item)}
-                              className="inline-flex items-center gap-1 rounded-md border border-[#d9ceb9] bg-[#faf6ee] px-2 py-1 text-[11px] font-medium text-[#5f523d] hover:bg-white"
-                            >
-                              <span className="text-[#6f6148]">{quickActionIcon(item.title)}</span>
-                              {item.title}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </details>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleNewChat}
-                      className="rounded-lg border border-[#d5c8b2] px-3 py-1.5 text-xs font-medium text-[#5f523d] hover:bg-[#f9f3e8]"
-                      disabled={!canSendPrompt}
-                    >
-                      Clear Current Chat
-                    </button>
-
-                    <button
-                      type="submit"
-                      className="rounded-xl bg-[#2f2a21] px-4 py-1.5 text-sm font-medium text-[#f8f5ef] disabled:cursor-not-allowed disabled:opacity-60"
-                      disabled={busy || !canSendPrompt}
-                    >
-                      {busy ? "Working..." : "Send"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </form>
-          </footer>
-        </section>
+        <ChatPanel
+          chatScope={chatScope}
+          activeFolder={activeFolder}
+          activeConversation={activeConversation}
+          activePendingAction={activePendingAction}
+          chatContainerRef={chatContainerRef}
+          feedback={feedback}
+          busy={busy}
+          canSendPrompt={canSendPrompt}
+          promptInput={promptInput}
+          setPromptInput={setPromptInput}
+          promptMode={promptMode}
+          setPromptMode={setPromptMode}
+          maxToolCalls={maxToolCalls}
+          setMaxToolCalls={setMaxToolCalls}
+          quickActions={quickActions}
+          handleQuickAction={handleQuickAction}
+          handleSendPrompt={handleSendPrompt}
+          handleConfirmPendingAction={handleConfirmPendingAction}
+          handleNewChat={handleNewChat}
+        />
       </div>
     </div>
   );
