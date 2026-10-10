@@ -29,6 +29,45 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
 
+  # The app itself, for running it without Node installed: docker compose --profile app up -d --build
+  # Without --profile app, only the databases start (the usual setup for npm run dev).
+  backend:
+    profiles: ["app"]
+    build: ./back-end
+    container_name: companyai-backend
+    restart: unless-stopped
+    # API keys and secrets come from back-end/.env; the addresses below replace its local ones.
+    env_file: ./back-end/.env
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      MONGODB_URI: mongodb://mongo:27017/${MONGO_DB:-medical}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ""
+      DNS_SERVERS: ""
+      CORS_ORIGIN: http://localhost:${FRONTEND_PORT:-3000}
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-4000}:4000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  frontend:
+    profiles: ["app"]
+    build:
+      context: ./front-end/my-app
+      args:
+        # The browser calls the API directly, so this is the host address, not the container name.
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:${BACKEND_PORT:-4000}/api/v1
+    container_name: companyai-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - backend
+
 volumes:
   mongo-data:
     name: companyai-mongo-data
