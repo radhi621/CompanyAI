@@ -189,3 +189,23 @@ export function messageBubbleClass(role: MessageRole): string {
 
   return "max-w-[88%] rounded-2xl border border-[#e3dbcf] bg-[#ffffff] px-4 py-3 text-[#2f2a21]";
 }
+
+// Same order as the backend's ROLE_LEVEL.
+const ROLE_LEVEL: Record<UserRole, number> = { secretary: 1, nurse: 2, doctor: 3, admin: 4 };
+
+/** Mirrors the backend rule: the uploader, or someone with a higher role, may delete or replace. */
+export function canModifyUpload(user: { id: string; role: UserRole }, upload: { createdBy: { _id: string } | null; createdByRole: UserRole }): boolean {
+  return upload.createdBy?._id === user.id || ROLE_LEVEL[user.role] > ROLE_LEVEL[upload.createdByRole];
+}
+
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}

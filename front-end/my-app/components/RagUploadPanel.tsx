@@ -5,6 +5,7 @@ import { useState } from "react";
 import type { ApiRequest, AuthUser, ChatMessage, PatientFolder, RagUploadMode } from "../lib/types";
 import { GLOBAL_CONVERSATION_ID } from "../lib/config";
 import { extractErrorMessage } from "../lib/utils";
+import PatientUploads from "./PatientUploads";
 
 interface RagUploadPanelProps {
   apiRequest: ApiRequest;
@@ -31,6 +32,9 @@ export default function RagUploadPanel({
   const [patientRagFiles, setPatientRagFiles] = useState<File[]>([]);
   const [patientRagPrompt, setPatientRagPrompt] = useState("");
   const [ragUploadMode, setRagUploadMode] = useState<RagUploadMode>("global");
+  const [patientUploadCount, setPatientUploadCount] = useState(0);
+  // Remounts the file input after an upload; the browser keeps showing the old file name otherwise.
+  const [fileInputKey, setFileInputKey] = useState(0);
 
   const handleUploadGlobalRag = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -71,6 +75,7 @@ export default function RagUploadPanel({
 
       setGlobalRagFiles([]);
       setGlobalRagNote("");
+      setFileInputKey((key) => key + 1);
       setFeedback("Global RAG upload completed.");
     } catch (error) {
       setFeedback(extractErrorMessage(error));
@@ -125,6 +130,8 @@ export default function RagUploadPanel({
 
       setPatientRagFiles([]);
       setPatientRagPrompt("");
+      setPatientUploadCount((count) => count + 1);
+      setFileInputKey((key) => key + 1);
       setFeedback("Patient RAG upload completed.");
     } catch (error) {
       setFeedback(extractErrorMessage(error));
@@ -138,96 +145,111 @@ export default function RagUploadPanel({
   };
 
   return (
-    <form
-      className="grid gap-2"
-      onSubmit={(event) => {
-        if (ragUploadMode === "global") {
-          void handleUploadGlobalRag(event);
-          return;
-        }
-
-        void handleUploadPatientRag(event);
-      }}
-    >
-      <div className="inline-flex rounded-lg border border-[#d2c6b1] bg-[#f6f0e4] p-1 text-xs">
-        <button
-          type="button"
-          onClick={() => setRagUploadMode("global")}
-          className={`rounded-md px-2 py-1 ${
-            ragUploadMode === "global" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
-          }`}
-        >
-          Global
-        </button>
-        <button
-          type="button"
-          onClick={() => setRagUploadMode("patient")}
-          className={`rounded-md px-2 py-1 ${
-            ragUploadMode === "patient" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
-          }`}
-        >
-          Patient
-        </button>
-      </div>
-
-      {ragUploadMode === "patient" && (
-        <div className="rounded-lg border border-[#d7ccb8] bg-[#fffdf8] px-2 py-2 text-[11px] text-[#615338]">
-          Active patient: {activeFolder ? `${activeFolder.name} (${activeFolder.patientId})` : "None"}
-        </div>
-      )}
-
-      <textarea
-        className="min-h-[56px] rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
-        placeholder={
-          ragUploadMode === "global" ? "Optional note" : "Optional prompt for parsing context"
-        }
-        value={ragUploadMode === "global" ? globalRagNote : patientRagPrompt}
-        onChange={(event) => {
+    <div className="grid gap-3">
+      <form
+        className="grid gap-2"
+        onSubmit={(event) => {
           if (ragUploadMode === "global") {
-            setGlobalRagNote(event.target.value);
+            void handleUploadGlobalRag(event);
             return;
           }
 
-          setPatientRagPrompt(event.target.value);
+          void handleUploadPatientRag(event);
         }}
-        disabled={ragUploadMode === "patient" && !activeFolder}
-      />
-
-      <input
-        type="file"
-        multiple
-        onChange={(event) => {
-          if (ragUploadMode === "global") {
-            setGlobalRagFiles(Array.from(event.target.files ?? []));
-            return;
-          }
-
-          setPatientRagFiles(Array.from(event.target.files ?? []));
-        }}
-        className="rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
-        disabled={ragUploadMode === "patient" && !activeFolder}
-      />
-
-      <button
-        type="submit"
-        className={`rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60 ${
-          ragUploadMode === "global" ? "bg-[#0f5a4f]" : "bg-[#1c4f8c]"
-        }`}
-        disabled={
-          busy ||
-          (ragUploadMode === "global" ? currentUser.role !== "admin" : !activeFolder)
-        }
       >
-        {busy
-          ? "Uploading..."
-          : ragUploadMode === "global"
-            ? "Upload Global RAG"
-            : "Upload Patient RAG"}
-      </button>
+        <div className="inline-flex rounded-lg border border-[#d2c6b1] bg-[#f6f0e4] p-1 text-xs">
+          <button
+            type="button"
+            onClick={() => setRagUploadMode("global")}
+            className={`rounded-md px-2 py-1 ${
+              ragUploadMode === "global" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
+            }`}
+          >
+            Global
+          </button>
+          <button
+            type="button"
+            onClick={() => setRagUploadMode("patient")}
+            className={`rounded-md px-2 py-1 ${
+              ragUploadMode === "patient" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
+            }`}
+          >
+            Patient
+          </button>
+        </div>
 
-      {ragUploadMode === "global" && currentUser.role !== "admin" && (
-        <p className="text-[11px] text-[#8d6b35]">Only admin can upload global knowledge.</p>
+        {ragUploadMode === "patient" && (
+          <div className="rounded-lg border border-[#d7ccb8] bg-[#fffdf8] px-2 py-2 text-[11px] text-[#615338]">
+            Active patient: {activeFolder ? `${activeFolder.name} (${activeFolder.patientId})` : "None"}
+          </div>
+        )}
+
+        <textarea
+          className="min-h-[56px] rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
+          placeholder={
+            ragUploadMode === "global" ? "Optional note" : "Optional prompt for parsing context"
+          }
+          value={ragUploadMode === "global" ? globalRagNote : patientRagPrompt}
+          onChange={(event) => {
+            if (ragUploadMode === "global") {
+              setGlobalRagNote(event.target.value);
+              return;
+            }
+
+            setPatientRagPrompt(event.target.value);
+          }}
+          disabled={ragUploadMode === "patient" && !activeFolder}
+        />
+
+        <input
+          key={fileInputKey}
+          type="file"
+          multiple
+          onChange={(event) => {
+            if (ragUploadMode === "global") {
+              setGlobalRagFiles(Array.from(event.target.files ?? []));
+              return;
+            }
+
+            setPatientRagFiles(Array.from(event.target.files ?? []));
+          }}
+          className="rounded-lg border border-[#d7ccb8] bg-white px-2 py-2 text-xs"
+          disabled={ragUploadMode === "patient" && !activeFolder}
+        />
+
+        <button
+          type="submit"
+          className={`rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60 ${
+            ragUploadMode === "global" ? "bg-[#0f5a4f]" : "bg-[#1c4f8c]"
+          }`}
+          disabled={
+            busy ||
+            (ragUploadMode === "global" ? currentUser.role !== "admin" : !activeFolder)
+          }
+        >
+          {busy
+            ? "Uploading..."
+            : ragUploadMode === "global"
+              ? "Upload Global RAG"
+              : "Upload Patient RAG"}
+        </button>
+
+        {ragUploadMode === "global" && currentUser.role !== "admin" && (
+          <p className="text-[11px] text-[#8d6b35]">Only admin can upload global knowledge.</p>
+        )}
+      </form>
+
+      {ragUploadMode === "patient" && activeFolder && (
+        <PatientUploads
+          apiRequest={apiRequest}
+          currentUser={currentUser}
+          folder={activeFolder}
+          refreshKey={patientUploadCount}
+          busy={busy}
+          setBusy={setBusy}
+          setFeedback={setFeedback}
+        />
       )}
-    </form>
+    </div>
   );
 }

@@ -105,3 +105,23 @@ export interface FolderStats {
   lastMessageAt: number | undefined;
   sessions: Array<{ id: string; messageCount: number; lastMessageAt: number | undefined; isActive: boolean }>;
 }
+
+export interface UploadedSourceFile {
+  fileName: string;
+  extension: string;
+  mimeType: string;
+  sizeBytes: number;
+  /** Number of chunks stored for search; missing when indexing failed. */
+  chunkCount?: number;
+}
+
+/** One patient upload (an AI record created from files), as listed in RAG Upload. */
+export interface PatientUpload {
+  _id: string;
+  patientId: string;
+  mode: "rag" | "non_rag";
+  sourceFiles: UploadedSourceFile[];
+  createdBy: { _id: string; name: string; role: UserRole } | null;
+  createdByRole: UserRole;
+  createdAt: string;
+}
