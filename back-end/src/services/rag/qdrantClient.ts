@@ -3,7 +3,8 @@ import { env } from "../../config/env";
 
 export const qdrantClient = new QdrantClient({
   url: env.QDRANT_URL,
-  apiKey: env.QDRANT_API_KEY,
+  // Empty means no key (local Docker Qdrant); sending "" makes the client warn about an insecure key.
+  apiKey: env.QDRANT_API_KEY || undefined,
   checkCompatibility: false,
 });
 

@@ -17,6 +17,20 @@ services:
       retries: 5
       start_period: 10s
 
+  qdrant:
+    # Vector database for RAG search. Matches the @qdrant/js-client-rest version in back-end.
+    image: qdrant/qdrant:v1.17.0
+    container_name: companyai-qdrant
+    restart: unless-stopped
+    ports:
+      # Host port is configurable via QDRANT_PORT in a root .env file (defaults to 6333).
+      # Bound to 127.0.0.1 only: the instance has no API key, so it must not be reachable from the network.
+      - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
 volumes:
   mongo-data:
     name: companyai-mongo-data
+  qdrant-data:
+    name: companyai-qdrant-data
