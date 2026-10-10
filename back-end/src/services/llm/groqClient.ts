@@ -21,6 +21,8 @@ export const groqClient = {
       ],
       max_tokens: MAX_OUTPUT_TOKENS,
       temperature: 0.7,
+      // gpt-oss models reason before answering, and that counts toward max_tokens.
+      ...(env.GROQ_MODEL.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" as const } : {}),
     });
 
     const choice = completion.choices[0];

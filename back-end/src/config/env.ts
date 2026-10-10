@@ -31,7 +31,7 @@ const envSchema = z.object({
   GEMINI_EMBEDDING_MODEL: z.string().default("gemini-embedding-001"),
 
   GROQ_API_KEY: z.string().min(1, "GROQ_API_KEY is required"),
-  GROQ_MODEL: z.string().default("llama-3.3-70b-versatile"),
+  GROQ_MODEL: z.string().default("openai/gpt-oss-120b"),
 
   QDRANT_URL: z.string().url("QDRANT_URL must be a valid URL"),
   QDRANT_API_KEY: z.string().optional(),
