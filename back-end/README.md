@@ -103,9 +103,10 @@ Recommended defaults are already included in .env.example.
 
 npm install
 
-2. Type check
+2. Type check and lint
 
 npm run typecheck
+npm run lint
 
 3. Build
 

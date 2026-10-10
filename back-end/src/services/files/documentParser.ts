@@ -41,7 +41,8 @@ const SUPPORTED_MIME_TYPES = new Set([
 
 function normalizeText(value: string): string {
   return value
-    .replace(/\u0000/g, "")
+    // NUL bytes from binary formats break text storage and search.
+    .replaceAll("\0", "")
     .replace(/\r/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -168,7 +169,7 @@ export const parseUploadedDocuments = async (
 
   for (const file of files) {
     const extension = assertSupportedFormat(file.originalname, file.mimetype);
-    let parsedText = "";
+    let parsedText: string;
 
     try {
       parsedText = await parseByExtension(extension, file.buffer);

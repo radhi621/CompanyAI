@@ -93,8 +93,11 @@ function unknownErrorMessage(error: unknown): string {
   return String(error);
 }
 
+// Qdrant client 1.19 removed search(); query() is the replacement (Qdrant server 1.10+).
+type ScoredPoints = Awaited<ReturnType<typeof qdrantClient.query>>["points"];
+
 function mapSearchResultsToChunks(
-  results: Awaited<ReturnType<typeof qdrantClient.search>>,
+  results: ScoredPoints,
   defaultLabel: string,
 ): IAIContextChunk[] {
   return results
@@ -115,14 +118,14 @@ function mapSearchResultsToChunks(
 
 export const ragService = {
   async retrieveContext(patientId: string, query: string, limit = 3): Promise<IAIContextChunk[]> {
-    let results: Awaited<ReturnType<typeof qdrantClient.search>>;
+    let results: ScoredPoints;
 
     try {
       await ensureQdrantCollection();
       const queryVector = await geminiClient.embedText(query);
 
-      results = await qdrantClient.search(env.QDRANT_COLLECTION, {
-        vector: queryVector,
+      ({ points: results } = await qdrantClient.query(env.QDRANT_COLLECTION, {
+        query: queryVector,
         limit,
         with_payload: true,
         filter: {
@@ -137,7 +140,7 @@ export const ragService = {
             },
           ],
         },
-      });
+      }));
     } catch (error) {
       if (error instanceof ApiError) {
         throw error;
@@ -152,14 +155,14 @@ export const ragService = {
   },
 
   async retrieveGlobalContext(query: string, limit = 5): Promise<IAIContextChunk[]> {
-    let results: Awaited<ReturnType<typeof qdrantClient.search>>;
+    let results: ScoredPoints;
 
     try {
       await ensureQdrantCollection();
       const queryVector = await geminiClient.embedText(query);
 
-      results = await qdrantClient.search(env.QDRANT_COLLECTION, {
-        vector: queryVector,
+      ({ points: results } = await qdrantClient.query(env.QDRANT_COLLECTION, {
+        query: queryVector,
         limit,
         with_payload: true,
         filter: {
@@ -170,7 +173,7 @@ export const ragService = {
             },
           ],
         },
-      });
+      }));
     } catch (error) {
       if (error instanceof ApiError) {
         throw error;

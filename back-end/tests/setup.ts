@@ -16,6 +16,7 @@ beforeAll(async () => {
     throw new Error(
       `Cannot reach the test MongoDB at ${uri}. Start it with "docker compose up -d" from the repo root ` +
         `(or set TEST_MONGODB_URI). Cause: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
   await mongoose.connection.dropDatabase();
