@@ -15,7 +15,7 @@ beforeEach(() => {
   vi.spyOn(qdrantClient, "collectionExists").mockResolvedValue({ exists: true } as never);
   vi.spyOn(qdrantClient, "createPayloadIndex").mockResolvedValue({} as never);
   vi.spyOn(qdrantClient, "upsert").mockResolvedValue({} as never);
-  vi.spyOn(qdrantClient, "search").mockResolvedValue([] as never);
+  vi.spyOn(qdrantClient, "query").mockResolvedValue({ points: [] } as never);
   vi.spyOn(qdrantClient, "delete").mockImplementation(async (...args: DeleteArgs) => {
     vectorDeletes.push(args);
     return {} as never;
