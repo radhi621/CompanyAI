@@ -19,6 +19,9 @@ const envSchema = z.object({
   LLM_RETRIES_PER_PROVIDER: z.coerce.number().int().min(1).max(5).default(2),
   LLM_RETRY_BASE_DELAY_MS: z.coerce.number().int().min(50).max(5000).default(250),
   AGENT_IDEMPOTENCY_TTL_MINUTES: z.coerce.number().int().min(1).max(10080).default(1440),
+  // Per-user limits on the routes that call the AI providers (shared quota).
+  AGENT_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).default(20),
+  AI_RECORD_RATE_LIMIT_PER_HOUR: z.coerce.number().int().min(1).default(60),
 
   JWT_ACCESS_SECRET: z.string().min(16, "JWT_ACCESS_SECRET must be at least 16 chars"),
   JWT_REFRESH_SECRET: z.string().min(16, "JWT_REFRESH_SECRET must be at least 16 chars"),

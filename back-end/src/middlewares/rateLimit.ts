@@ -1,4 +1,6 @@
+import type { Request } from "express";
 import { rateLimit } from "express-rate-limit";
+import { env } from "../config/env";
 
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const ONE_HOUR_MS = 60 * 60 * 1000;
@@ -27,4 +29,30 @@ export const refreshRateLimit = rateLimit({
   standardHeaders: "draft-8",
   legacyHeaders: false,
   message: { message: "Too many token refresh requests. Try again later." },
+});
+
+// The AI routes below share one Gemini/Groq quota, so one user (or one script) must not be
+// able to spend it for everyone. They run after authenticate, so they count per user.
+const ONE_MINUTE_MS = 60 * 1000;
+
+function perUser(req: Request): string {
+  return req.user?.id ?? "anonymous";
+}
+
+export const agentRateLimit = rateLimit({
+  windowMs: ONE_MINUTE_MS,
+  limit: () => env.AGENT_RATE_LIMIT_PER_MINUTE,
+  keyGenerator: perUser,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { message: "Too many assistant requests. Wait a minute and try again." },
+});
+
+export const aiRecordRateLimit = rateLimit({
+  windowMs: ONE_HOUR_MS,
+  limit: () => env.AI_RECORD_RATE_LIMIT_PER_HOUR,
+  keyGenerator: perUser,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { message: "Too many AI record uploads or generations. Try again later." },
 });
