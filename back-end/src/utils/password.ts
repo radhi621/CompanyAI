@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 
-const SALT_ROUNDS = 12;
+// Cheaper hashing in tests only; production keeps cost 12.
+const SALT_ROUNDS = process.env.NODE_ENV === "test" ? 4 : 12;
 
 export const hashPassword = async (rawPassword: string): Promise<string> => {
   return bcrypt.hash(rawPassword, SALT_ROUNDS);

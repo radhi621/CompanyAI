@@ -3,6 +3,7 @@ import { Types } from "mongoose";
 import { env } from "../../config/env";
 import { AppointmentModel } from "../../models/Appointment";
 import { DoctorModel, type IDoctorDocument } from "../../models/Doctor";
+import { UserModel } from "../../models/User";
 import {
   DoctorScheduleModel,
   type IDoctorScheduleDocument,
@@ -67,6 +68,10 @@ function parseTime(value: string): { hour: number; minute: number } {
   };
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function overlapExists(startA: Date, endA: Date, startB: Date, endB: Date): boolean {
   return startA < endB && endA > startB;
 }
@@ -113,8 +118,71 @@ function isBlockedByExceptions(
   return unavailableBlocks.some((block) => overlapExists(slotStart, slotEnd, block.startAt, block.endAt));
 }
 
+/** The timezone a doctor's schedule is expressed in (falls back to the clinic timezone). */
+export async function getDoctorTimezone(doctorId: string): Promise<string> {
+  const schedule = await DoctorScheduleModel.findOne({ doctorId: new Types.ObjectId(doctorId) }).select("timezone");
+  return schedule?.timezone || env.APP_TIMEZONE;
+}
+
+/**
+ * Rejects an appointment that falls outside the doctor's weekly availability or overlaps
+ * one of their unavailable blocks. Doctors without a configured schedule are not restricted.
+ */
+export async function assertWithinDoctorSchedule(doctorId: string, startAt: Date, endAt: Date): Promise<void> {
+  const schedule = await DoctorScheduleModel.findOne({ doctorId: new Types.ObjectId(doctorId) });
+  if (!schedule || schedule.weeklyAvailability.length === 0) {
+    return;
+  }
+
+  const tz = schedule.timezone || env.APP_TIMEZONE;
+  const localStart = DateTime.fromJSDate(startAt, { zone: tz });
+  const localEnd = DateTime.fromJSDate(endAt, { zone: tz });
+  const dayOfWeek = localStart.weekday % 7;
+
+  const fitsWindow = schedule.weeklyAvailability.some((window) => {
+    if (window.dayOfWeek !== dayOfWeek) {
+      return false;
+    }
+
+    const start = parseTime(window.startTime);
+    const end = parseTime(window.endTime);
+    const windowStart = localStart.set({ hour: start.hour, minute: start.minute, second: 0, millisecond: 0 });
+    const windowEnd = localStart.set({ hour: end.hour, minute: end.minute, second: 0, millisecond: 0 });
+    return localStart >= windowStart && localEnd <= windowEnd;
+  });
+
+  if (!fitsWindow) {
+    throw new ApiError(400, "Appointment is outside the doctor's working hours", {
+      timezone: tz,
+      requestedStartLocal: localStart.toISO(),
+      requestedEndLocal: localEnd.toISO(),
+    });
+  }
+
+  if (isBlockedByExceptions(schedule.unavailableBlocks, startAt, endAt)) {
+    throw new ApiError(400, "The doctor is unavailable during this time");
+  }
+}
+
 export const doctorsService = {
   async create(input: CreateDoctorInput): Promise<IDoctorDocument> {
+    // A profile can only be linked to an active doctor account that has no profile yet.
+    if (input.userId) {
+      const user = await UserModel.findById(input.userId).select("role isActive");
+      if (!user) {
+        throw new ApiError(404, "Linked user account not found");
+      }
+      if (user.role !== "doctor") {
+        throw new ApiError(400, "Linked user must have the doctor role");
+      }
+      if (!user.isActive) {
+        throw new ApiError(400, "Linked user account is deactivated");
+      }
+      if (await DoctorModel.exists({ userId: user._id })) {
+        throw new ApiError(409, "This doctor account is already linked to a doctor profile");
+      }
+    }
+
     const doctor = await DoctorModel.create({
       userId: input.userId ? new Types.ObjectId(input.userId) : undefined,
       fullName: input.fullName,
@@ -130,7 +198,7 @@ export const doctorsService = {
   async list(input: ListDoctorsInput): Promise<IDoctorDocument[]> {
     const query: Record<string, unknown> = {};
     if (input.specialty) {
-      query.specialty = new RegExp(input.specialty, "i");
+      query.specialty = new RegExp(escapeRegex(input.specialty), "i");
     }
     if (input.isActive !== undefined) {
       query.isActive = input.isActive;
@@ -174,7 +242,7 @@ export const doctorsService = {
       },
       {
         upsert: true,
-        new: true,
+        returnDocument: "after",
       },
     );
 
@@ -214,6 +282,7 @@ export const doctorsService = {
     const fromUtc = fromLocal.toUTC().toJSDate();
     const endUtc = endLocal.toUTC().toJSDate();
 
+    const now = new Date();
     const bookedAppointments = await AppointmentModel.find({
       doctorId: doctor._id,
       deletedAt: { $exists: false },
@@ -251,6 +320,12 @@ export const doctorsService = {
           const slotEnd = cursor.plus({ minutes: input.estimatedDurationMinutes });
           const slotStartDate = slotStart.toUTC().toJSDate();
           const slotEndDate = slotEnd.toUTC().toJSDate();
+
+          // Never offer a slot that has already started.
+          if (slotStartDate < now) {
+            cursor = cursor.plus({ minutes: schedule.slotStepMinutes });
+            continue;
+          }
 
           const blockedByException = isBlockedByExceptions(
             schedule.unavailableBlocks,

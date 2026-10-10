@@ -17,6 +17,17 @@ function extractErrorMessage(error: unknown): string {
   return String(error);
 }
 
+// Builds a UTC ISO timestamp from a local calendar day and an "HH:mm" time picked in the browser.
+function toIsoFromLocal(day: Date, time: string): string {
+  const [hours, minutes] = time.split(":").map(Number);
+  return new Date(day.getFullYear(), day.getMonth(), day.getDate(), hours, minutes).toISOString();
+}
+
+function toLocalTimeValue(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 function formatTime(iso: string) {
   const d = new Date(iso);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -24,7 +35,7 @@ function formatTime(iso: string) {
 
 interface Appointment {
   _id: string;
-  patientId: { _id: string; name?: string } | string;
+  patientId: { _id: string; firstName?: string; lastName?: string } | string;
   doctorId: { _id: string; name?: string } | string;
   startAt: string;
   endAt: string;
@@ -38,9 +49,13 @@ type StatusFilter = "all" | "planned" | "confirmed" | "completed" | "cancelled" 
 
 interface CalendarProps {
   token: string | null;
+  /** Exchanges the refresh cookie for a new access token; resolves null if the session ended. */
+  refreshAccessToken?: () => Promise<string | null>;
+  /** Admins may book outside a doctor's working hours. */
+  isAdmin?: boolean;
 }
 
-export default function Calendar({ token }: CalendarProps) {
+export default function Calendar({ token, refreshAccessToken, isAdmin = false }: CalendarProps) {
   const today = useMemo(() => {
     const d = new Date();
     d.setHours(0, 0, 0, 0);
@@ -56,6 +71,24 @@ export default function Calendar({ token }: CalendarProps) {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [feedback, setFeedback] = useState("");
 
+  // Retries once with a refreshed token when the access token has expired.
+  const authFetch = useCallback(
+    async (path: string, init: RequestInit = {}): Promise<Response> => {
+      const send = (accessToken: string | null) => {
+        const headers = new Headers(init.headers);
+        if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+        return fetch(buildUrl(path), { ...init, headers, cache: "no-store" });
+      };
+
+      const res = await send(token);
+      if (res.status !== 401 || !refreshAccessToken) return res;
+
+      const refreshed = await refreshAccessToken();
+      return refreshed ? send(refreshed) : res;
+    },
+    [token, refreshAccessToken],
+  );
+
   const fetchAppointments = useCallback(async () => {
     if (!token) return;
     setLoading(true);
@@ -65,10 +98,7 @@ export default function Calendar({ token }: CalendarProps) {
     const from = new Date(year, month, 1).toISOString();
     const to = new Date(year, month + 1, 0, 23, 59, 59).toISOString();
     try {
-      const res = await fetch(buildUrl(`/appointments?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=200`), {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: "no-store",
-      });
+      const res = await authFetch(`/appointments?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=200`);
       const json = await res.json();
       if (!res.ok) throw new Error(json.message || "Failed to fetch appointments");
       setAppointments(json.data || []);
@@ -77,10 +107,15 @@ export default function Calendar({ token }: CalendarProps) {
     } finally {
       setLoading(false);
     }
-  }, [token, viewDate]);
+  }, [authFetch, token, viewDate]);
 
   useEffect(() => {
-    fetchAppointments();
+    // Deferred so the loading state is not set synchronously inside the effect.
+    const timerId = window.setTimeout(() => {
+      void fetchAppointments();
+    }, 0);
+
+    return () => window.clearTimeout(timerId);
   }, [fetchAppointments]);
 
   const year = viewDate.getFullYear();
@@ -130,7 +165,10 @@ export default function Calendar({ token }: CalendarProps) {
 
   function getPatientName(a: Appointment): string {
     const p = a.patientId;
-    if (typeof p === "object" && p !== null) return (p as { name?: string }).name || (p as { _id: string })._id.slice(-6);
+    if (typeof p === "object" && p !== null) {
+      const fullName = [p.firstName, p.lastName].filter(Boolean).join(" ");
+      return fullName || p._id.slice(-6);
+    }
     return String(p).slice(-6);
   }
 
@@ -141,15 +179,17 @@ export default function Calendar({ token }: CalendarProps) {
     const data = {
       patientId: (form.elements.namedItem("patientId") as HTMLInputElement).value,
       doctorId: (form.elements.namedItem("doctorId") as HTMLInputElement).value,
-      startAt: `${selectedDay.toISOString().slice(0, 10)}T${(form.elements.namedItem("time") as HTMLInputElement).value}:00.000Z`,
+      startAt: toIsoFromLocal(selectedDay, (form.elements.namedItem("time") as HTMLInputElement).value),
       estimatedDurationMinutes: parseInt((form.elements.namedItem("duration") as HTMLInputElement).value, 10),
       reason: (form.elements.namedItem("reason") as HTMLInputElement).value,
       notes: (form.elements.namedItem("notes") as HTMLTextAreaElement).value || undefined,
+      allowOutsideSchedule:
+        (form.elements.namedItem("allowOutsideSchedule") as HTMLInputElement | null)?.checked || undefined,
     };
     try {
-      const res = await fetch(buildUrl("/appointments"), {
+      const res = await authFetch("/appointments", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
       });
       const json = await res.json();
@@ -167,22 +207,28 @@ export default function Calendar({ token }: CalendarProps) {
     if (!token || !editingAppointment) return;
     const form = e.currentTarget;
     const body: Record<string, unknown> = {};
+    // Only send time/duration when they changed, so status or note edits are not treated as a reschedule.
     const timeVal = (form.elements.namedItem("time") as HTMLInputElement).value;
-    if (timeVal) {
-      body.startAt = `${new Date(editingAppointment.startAt).toISOString().slice(0, 10)}T${timeVal}:00.000Z`;
+    if (timeVal && timeVal !== toLocalTimeValue(editingAppointment.startAt)) {
+      body.startAt = toIsoFromLocal(new Date(editingAppointment.startAt), timeVal);
     }
     const durationVal = (form.elements.namedItem("duration") as HTMLInputElement).value;
-    if (durationVal) body.estimatedDurationMinutes = parseInt(durationVal, 10);
+    if (durationVal && parseInt(durationVal, 10) !== editingAppointment.estimatedDurationMinutes) {
+      body.estimatedDurationMinutes = parseInt(durationVal, 10);
+    }
     const reasonVal = (form.elements.namedItem("reason") as HTMLInputElement).value;
-    if (reasonVal) body.reason = reasonVal;
+    if (reasonVal && reasonVal !== editingAppointment.reason) body.reason = reasonVal;
     const notesVal = (form.elements.namedItem("notes") as HTMLTextAreaElement).value;
-    body.notes = notesVal || undefined;
+    if (notesVal !== (editingAppointment.notes || "")) body.notes = notesVal;
     const statusVal = (form.elements.namedItem("status") as HTMLSelectElement).value;
     if (statusVal) body.status = statusVal;
+    if ((form.elements.namedItem("allowOutsideSchedule") as HTMLInputElement | null)?.checked) {
+      body.allowOutsideSchedule = true;
+    }
     try {
-      const res = await fetch(buildUrl(`/appointments/${editingAppointment._id}`), {
+      const res = await authFetch(`/appointments/${editingAppointment._id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       const json = await res.json();
@@ -198,10 +244,7 @@ export default function Calendar({ token }: CalendarProps) {
   async function handleDeleteAppointment(id: string) {
     if (!token) return;
     try {
-      const res = await fetch(buildUrl(`/appointments/${id}`), {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`/appointments/${id}`, { method: "DELETE" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.message || "Failed to delete");
       setFeedback("Appointment deleted");
@@ -354,6 +397,12 @@ export default function Calendar({ token }: CalendarProps) {
             </div>
             <input name="reason" placeholder="Reason" required className="rounded border border-[#d7ccb8] bg-white px-2 py-1 text-[10px]" />
             <textarea name="notes" placeholder="Notes (optional)" rows={2} className="rounded border border-[#d7ccb8] bg-white px-2 py-1 text-[10px]" />
+            {isAdmin && (
+              <label className="flex items-center gap-1 text-[10px] text-[#6a5b43]">
+                <input name="allowOutsideSchedule" type="checkbox" />
+                Allow outside the doctor&apos;s working hours (admin)
+              </label>
+            )}
             <div className="flex gap-1">
               <button type="submit" className="flex-1 rounded bg-[#2f2a21] py-1 text-[10px] font-medium text-[#f8f4ec]">Create</button>
               <button type="button" onClick={() => setShowCreateForm(false)} className="rounded border border-[#d7ccb8] px-3 py-1 text-[10px] text-[#6a5b43]">Cancel</button>
@@ -372,7 +421,7 @@ export default function Calendar({ token }: CalendarProps) {
               <input
                 name="time"
                 type="time"
-                defaultValue={new Date(editingAppointment.startAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}
+                defaultValue={toLocalTimeValue(editingAppointment.startAt)}
                 className="w-24 rounded border border-[#d7ccb8] bg-white px-2 py-1 text-[10px]"
               />
               <input
@@ -408,6 +457,12 @@ export default function Calendar({ token }: CalendarProps) {
               rows={2}
               className="rounded border border-[#d7ccb8] bg-white px-2 py-1 text-[10px]"
             />
+            {isAdmin && (
+              <label className="flex items-center gap-1 text-[10px] text-[#6a5b43]">
+                <input name="allowOutsideSchedule" type="checkbox" />
+                Allow outside the doctor&apos;s working hours (admin)
+              </label>
+            )}
             <div className="flex gap-1">
               <button type="submit" className="flex-1 rounded bg-[#2f2a21] py-1 text-[10px] font-medium text-[#f8f4ec]">Update</button>
               <button

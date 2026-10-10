@@ -31,6 +31,8 @@ interface LoginInput {
   password: string;
 }
 
+const REFRESH_REUSE_GRACE_MS = 30 * 1000;
+
 const refreshTokenTtlMs = toMilliseconds(env.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60 * 1000);
 
 function toMilliseconds(value: string, defaultMs: number): number {
@@ -90,9 +92,18 @@ async function issueTokens(user: IUserDocument, userAgent?: string, ipAddress?: 
   };
 }
 
+/**
+ * Whether the one-time setup (creating the first admin) still has to be done. Only
+ * reveals that no admin exists yet, which the setup screen needs to know.
+ */
+export const getSetupStatus = async (): Promise<{ needsSetup: boolean }> => {
+  const adminExists = await UserModel.exists({ role: "admin" });
+  return { needsSetup: !adminExists };
+};
+
 export const bootstrapAdmin = async (input: BootstrapAdminInput): Promise<AuthUser & { isActive: boolean }> => {
   if (input.bootstrapKey !== env.BOOTSTRAP_ADMIN_KEY) {
-    throw new ApiError(403, "Invalid bootstrap key");
+    throw new ApiError(403, "Invalid setup key");
   }
 
   const existingAdmin = await UserModel.exists({ role: "admin" });
@@ -171,6 +182,16 @@ export const rotateRefreshToken = async (
   }
 
   if (tokenDoc.revokedAt) {
+    // A token that was rotated away is being presented again. Outside a short grace
+    // window (two tabs refreshing at the same moment) that means a copy of it leaked,
+    // so end every session for this user and force a fresh login.
+    const rotatedAgoMs = Date.now() - tokenDoc.revokedAt.getTime();
+    if (tokenDoc.replacedByTokenHash && rotatedAgoMs > REFRESH_REUSE_GRACE_MS) {
+      await revokeUserRefreshTokens(tokenDoc.userId.toString());
+      console.warn(`[auth] Refresh token reuse detected for user ${tokenDoc.userId}; all sessions revoked`);
+      throw new ApiError(401, "Session ended for security reasons. Please log in again.");
+    }
+
     throw new ApiError(401, "Refresh token has already been revoked");
   }
 
@@ -183,8 +204,14 @@ export const rotateRefreshToken = async (
     throw new ApiError(401, "User no longer available");
   }
 
-  tokenDoc.revokedAt = new Date();
-  await tokenDoc.save();
+  // Claim the token atomically so two concurrent refreshes cannot both rotate it.
+  const claimed = await RefreshTokenModel.updateOne(
+    { _id: tokenDoc._id, revokedAt: { $exists: false } },
+    { $set: { revokedAt: new Date() } },
+  );
+  if (claimed.modifiedCount === 0) {
+    throw new ApiError(401, "Refresh token has already been revoked");
+  }
 
   const tokens = await issueTokens(user, userAgent, ipAddress);
   tokenDoc.replacedByTokenHash = hashRefreshToken(tokens.refreshToken);
@@ -205,6 +232,50 @@ export const logout = async (refreshToken: string): Promise<void> => {
 
   tokenDoc.revokedAt = new Date();
   await tokenDoc.save();
+};
+
+/**
+ * Revokes all of a user's active refresh tokens, optionally keeping one (the caller's
+ * current session). Used when an account is deactivated or its password changes.
+ */
+export const revokeUserRefreshTokens = async (userId: string, exceptRefreshToken?: string): Promise<void> => {
+  const filter: Record<string, unknown> = {
+    userId: new Types.ObjectId(userId),
+    revokedAt: { $exists: false },
+  };
+
+  if (exceptRefreshToken) {
+    filter.tokenHash = { $ne: hashRefreshToken(exceptRefreshToken) };
+  }
+
+  await RefreshTokenModel.updateMany(filter, { $set: { revokedAt: new Date() } });
+};
+
+export const changeOwnPassword = async (input: {
+  userId: string;
+  currentPassword: string;
+  newPassword: string;
+  currentRefreshToken?: string;
+}): Promise<void> => {
+  const user = await UserModel.findById(input.userId).select("+password");
+  if (!user || !user.isActive) {
+    throw new ApiError(404, "User not found");
+  }
+
+  const matches = await user.comparePassword(input.currentPassword);
+  if (!matches) {
+    throw new ApiError(400, "Current password is incorrect");
+  }
+
+  if (input.currentPassword === input.newPassword) {
+    throw new ApiError(400, "New password must be different from the current password");
+  }
+
+  user.password = input.newPassword;
+  await user.save();
+
+  // Sign out every other session; the session making this request stays signed in.
+  await revokeUserRefreshTokens(input.userId, input.currentRefreshToken);
 };
 
 export const getCurrentUser = async (userId: string): Promise<AuthUser & { isActive: boolean }> => {

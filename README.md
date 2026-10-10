@@ -1,4 +1,3 @@
-
 # CompanyAI / MediAssist IA
 
 CompanyAI is a full-stack medical operations workspace built around the MediAssist IA assistant. The repository contains a TypeScript Express backend and a Next.js frontend for managing patients, doctors, appointments, AI-assisted records, and agent-driven workflows.
@@ -22,12 +21,29 @@ CompanyAI is a full-stack medical operations workspace built around the MediAssi
 ## Prerequisites
 
 - Node.js 20 or newer
-- MongoDB running locally
-- Qdrant running locally or remotely
+- Docker (for the local MongoDB and Qdrant containers), or both installed natively
 - Gemini API key
 - Groq API key
 
 ## Setup
+
+### 0. Databases (MongoDB and Qdrant in Docker)
+
+From the repository root:
+
+```bash
+docker compose up -d     # create/start MongoDB and Qdrant (data persists in the companyai-mongo-data and companyai-qdrant-data volumes)
+docker compose stop      # pause it
+docker compose start     # resume it
+docker compose down      # remove the container (data is kept)
+docker compose down -v   # remove the container AND delete all data
+```
+
+Open a shell on the database with `docker exec -it companyai-mongo mongosh medical`.
+
+MongoDB is exposed on `127.0.0.1:27017` by default. If that port is already taken (for example by a native MongoDB service), create a root `.env` file with `MONGO_PORT=27018` and use that port in `MONGODB_URI`.
+
+Qdrant (the vector database used for RAG search) is exposed on `127.0.0.1:6333` (change it with `QDRANT_PORT` in the root `.env`). Its dashboard is at http://localhost:6333/dashboard. The collection is created automatically on the first upload. It has no API key, so leave `QDRANT_API_KEY` empty; it is only reachable from this machine. Embeddings still come from Gemini, so `GEMINI_API_KEY` is required for uploads and search.
 
 ### 1. Backend environment
 
@@ -37,6 +53,7 @@ Use a local MongoDB URI, for example:
 
 ```bash
 MONGODB_URI=mongodb://127.0.0.1:27017/medical
+QDRANT_URL=http://localhost:6333
 ```
 
 Other required backend values include JWT secrets, `BOOTSTRAP_ADMIN_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, and `QDRANT_URL`.
@@ -89,6 +106,26 @@ Open the frontend at `http://localhost:3000` and the backend API at `http://loca
 - `npm run build` - compile TypeScript
 - `npm run start` - run the compiled server
 - `npm run typecheck` - run TypeScript validation
+- `npm test` - run the backend test suite (`npm run test:watch` to re-run on changes)
+- `npm run seed:demo` - add demo data for local development (`npm run seed:demo -- --remove` to delete it)
+
+### Demo data
+
+`npm run seed:demo` (in `back-end/`) adds a ready-to-use clinic to the database in `MONGODB_URI`:
+
+- demo staff accounts for every role, all with the password `DemoPass123`:
+  `admin@demo.mediassist.local`, `dr.amrani@demo.mediassist.local`, `nurse.bennani@demo.mediassist.local`, `secretary.alaoui@demo.mediassist.local`
+- two doctors with weekly schedules (general medicine Mon–Fri 09:00–17:00, cardiology Tue/Thu 10:00–16:00)
+- five patients with pathologies and notes, assigned to the demo doctor, nurse and secretary
+- upcoming appointments within working hours, plus two completed past visits
+
+Everything it creates is marked (demo email domain, `DEMO` CINs, `DEMO-` licence numbers), so it never touches your own data, running it twice does nothing, and `npm run seed:demo -- --remove` deletes exactly what it added. It refuses to run with `NODE_ENV=production`. Never reuse the demo password outside local development.
+
+### Backend tests
+
+The tests (Vitest + Supertest, in `back-end/tests/`) exercise the API against a real MongoDB, so start the database first with `docker compose up -d`. They use a separate database named `mediassist_test` on the Docker port (picked up from `MONGO_PORT` in the root `.env`), and refuse to run against any database whose name does not end in `_test`. Set `TEST_MONGODB_URI` to use a different instance.
+
+Gemini, Groq and Qdrant are stubbed, and the test environment uses dummy keys, so tests never call external services or use your API quota.
 
 ## Frontend Scripts
 
@@ -101,8 +138,8 @@ Open the frontend at `http://localhost:3000` and the backend API at `http://loca
 
 1. Make sure MongoDB, Qdrant, and the backend are running.
 2. Open the frontend in your browser.
-3. Bootstrap the first admin account using the backend bootstrap admin flow.
-4. Log in with a staff account.
+3. On a fresh install (no admin yet) the app shows a one-time **Set up MediAssist** screen: enter the setup key (`BOOTSTRAP_ADMIN_KEY` from `back-end/.env`) and the first admin's details. You are signed in straight away, and the screen never appears again.
+4. After that, everyone uses the normal **Sign in** screen. Admins create the other staff accounts from **Staff Accounts** in the sidebar.
 5. Use the frontend console to manage patients, doctors, appointments, and AI-assisted records.
 6. Use the agent tools for natural-language workflows when you need the assistant to carry out supported actions.
 

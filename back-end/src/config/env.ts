@@ -8,12 +8,20 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   MONGODB_URI: z.string().min(1, "MONGODB_URI is required"),
   CORS_ORIGIN: z.string().default("http://localhost:3000"),
+  // Comma-separated DNS servers to use instead of the system resolver, e.g. "1.1.1.1,8.8.8.8".
+  DNS_SERVERS: z
+    .string()
+    .default("")
+    .transform((value) => value.split(",").map((server) => server.trim()).filter(Boolean)),
   APP_TIMEZONE: z.string().default("Africa/Casablanca"),
   DEFAULT_APPOINTMENT_DURATION_MINUTES: z.coerce.number().int().positive().default(45),
   MAX_APPOINTMENT_DURATION_MINUTES: z.coerce.number().int().positive().default(720),
   LLM_RETRIES_PER_PROVIDER: z.coerce.number().int().min(1).max(5).default(2),
   LLM_RETRY_BASE_DELAY_MS: z.coerce.number().int().min(50).max(5000).default(250),
   AGENT_IDEMPOTENCY_TTL_MINUTES: z.coerce.number().int().min(1).max(10080).default(1440),
+  // Per-user limits on the routes that call the AI providers (shared quota).
+  AGENT_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).default(20),
+  AI_RECORD_RATE_LIMIT_PER_HOUR: z.coerce.number().int().min(1).default(60),
 
   JWT_ACCESS_SECRET: z.string().min(16, "JWT_ACCESS_SECRET must be at least 16 chars"),
   JWT_REFRESH_SECRET: z.string().min(16, "JWT_REFRESH_SECRET must be at least 16 chars"),
@@ -26,7 +34,7 @@ const envSchema = z.object({
   GEMINI_EMBEDDING_MODEL: z.string().default("gemini-embedding-001"),
 
   GROQ_API_KEY: z.string().min(1, "GROQ_API_KEY is required"),
-  GROQ_MODEL: z.string().default("llama-3.3-70b-versatile"),
+  GROQ_MODEL: z.string().default("openai/gpt-oss-120b"),
 
   QDRANT_URL: z.string().url("QDRANT_URL must be a valid URL"),
   QDRANT_API_KEY: z.string().optional(),

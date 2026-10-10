@@ -17,7 +17,6 @@ export const AGENT_TOOL_NAMES = [
   "list_patient_notes",
   "delete_patient_note",
   "get_day_schedule",
-  "create_staff_account",
   "create_doctor_profile",
   "list_doctors",
   "update_patient",
@@ -40,7 +39,6 @@ export type AgentToolName =
   | "delete_patient_note"
   | "update_patient"
   | "get_day_schedule"
-  | "create_staff_account"
   | "create_doctor_profile"
   | "list_doctors";
 
@@ -56,7 +54,7 @@ export interface IAgentPendingActionDocument extends Document {
   actorRole: UserRole;
   prompt: string;
   toolCalls: IAgentToolCall[];
-  status: "pending" | "approved" | "executed" | "rejected";
+  status: "pending" | "approved" | "executed" | "rejected" | "failed";
   expiresAt: Date;
   approvedAt?: Date;
   executedAt?: Date;
@@ -109,7 +107,7 @@ const agentPendingActionSchema = new Schema<IAgentPendingActionDocument>(
     },
     status: {
       type: String,
-      enum: ["pending", "approved", "executed", "rejected"],
+      enum: ["pending", "approved", "executed", "rejected", "failed"],
       required: true,
       default: "pending",
       index: true,
