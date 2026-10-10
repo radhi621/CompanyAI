@@ -10,7 +10,8 @@ import {
 } from "../../models/AgentPendingAction";
 import type { AuthUser } from "../../types/auth";
 import { ApiError } from "../../utils/apiError";
-import { llmRouter } from "../../services/llm/llmRouter";
+import { llmRouter, type LLMProvider } from "../../services/llm/llmRouter";
+import { buildFallbackAnswer } from "./agent.fallbackAnswer";
 import { acquireIdempotency, completeIdempotency, failIdempotency } from "./agent.idempotency";
 import {
   executeToolCall,
@@ -277,7 +278,9 @@ function buildPlannerPrompt(actor: AuthUser, prompt: string, maxToolCalls: numbe
     `Limit planned tool calls to at most ${maxToolCalls}.`,
     "Return only a JSON object with this exact shape:",
     '{"thought":"optional","toolCalls":[{"tool":"...","args":{},"reason":"optional"}],"finalMessage":"optional"}',
-    "The finalMessage must be a thorough, detailed summary of what was done and the key results when tools are planned, or a comprehensive answer to the user's question when no tools are needed.",
+    // The answer the user reads is written later from the tool results, so a finalMessage written
+    // before any data exists is only used when no tools are needed.
+    "Leave finalMessage out when you plan tool calls. When no tools are needed, finalMessage is the complete answer to the user, in Markdown.",
     "Do not wrap JSON in markdown.",
     "Never use symbolic placeholders in args (for example: @search_patient.output.patientId, <PATIENT_ID>, <DOCTOR_ID>).",
     "If an ID is unknown, plan only the discovery call first (for example search_patient) and let the system continue.",
@@ -375,6 +378,11 @@ function buildSynthesisPrompt(actor: AuthUser, prompt: string, results: Executed
       "and the record's full ID as the last column, written in backticks (e.g. `6ac7f8e295fc5deac8262ee7`).",
       "Never shorten IDs: follow-up requests rely on them.",
     ].join(" "),
+    [
+      "Write tables compactly: exactly one space on each side of every cell, never pad cells with extra spaces",
+      "to line columns up, and keep the separator row as | --- | --- |.",
+      "Example row: | 2026-10-09 | Dr Youssef Amrani | Follow-up in 3 months | `6ac7f8e295fc5deac8262ee7` |",
+    ].join(" "),
     "Use a dash (—) for missing values, dates as YYYY-MM-DD, and keep cell text short.",
     "A single record can be shown as a short bold-labelled list instead of a table.",
     "Start with a one-line count or summary (e.g. 'Total patients: 5'), then the table.",
@@ -390,6 +398,34 @@ function buildSynthesisPrompt(actor: AuthUser, prompt: string, results: Executed
   return parts.join("\n\n");
 }
 
+interface WrittenAnswer {
+  text: string;
+  /** null when no provider could write it and the answer was built from the data. */
+  provider: LLMProvider | null;
+}
+
+/**
+ * Writes the answer the user reads from the tool results. When every provider fails, the
+ * results are rendered as Markdown instead, so the answer always contains the data.
+ */
+async function writeAnswer(
+  actor: AuthUser,
+  prompt: string,
+  results: ExecutedToolResult[],
+  history?: ConversationTurn[],
+): Promise<WrittenAnswer> {
+  try {
+    const written = await llmRouter.generate(buildSynthesisPrompt(actor, prompt, results, history), {
+      retriesPerProvider: 2,
+      retryBaseDelayMs: env.LLM_RETRY_BASE_DELAY_MS,
+    });
+    return { text: written.text, provider: written.provider };
+  } catch (error) {
+    console.error(`[Agent] Writing the answer failed, showing the data instead: ${extractErrorMessage(error)}`);
+    return { text: buildFallbackAnswer(results), provider: null };
+  }
+}
+
 function toToolCalls(
   parsed: z.infer<typeof plannerResponseSchema>,
   maxToolCalls: number,
@@ -401,16 +437,16 @@ function toToolCalls(
   }));
 }
 
+// Tools after which an automatic search of the patient's uploaded records can add context
+// (open questions about a patient). Any other tool, such as list_patient_notes or
+// list_appointments, already answers the request, and searching files would only add noise.
+const RECORD_SEARCH_CONTEXT_TOOLS = new Set<string>(["search_patient", "list_patients", "get_patient_summary"]);
+
 function shouldAutoChainRecordSearch(prompt: string, calls: IAgentToolCall[]): boolean {
-  const hasRecordSearch = calls.some((call) => call.tool === "search_medical_records_RAG");
-  const hasDestructiveTool = calls.some((call) => isToolDestructive(call.tool));
+  const onlyContextTools = calls.every((call) => RECORD_SEARCH_CONTEXT_TOOLS.has(call.tool));
   const isInsertModePrompt = /\bmode:\s*insert\b/i.test(prompt);
 
-  if (hasRecordSearch || hasDestructiveTool || isInsertModePrompt) {
-    return false;
-  }
-
-  return true;
+  return onlyContextTools && !isInsertModePrompt;
 }
 
 function normalizePatientId(value: unknown): string | null {
@@ -741,6 +777,46 @@ async function planToolCalls(
   }
 }
 
+const PATIENT_LOOKUP_TOOLS = new Set<string>(["search_patient", "list_patients"]);
+
+/**
+ * Second planning turn. When the user names a patient instead of giving an ID, the planner can
+ * only plan the lookup. Once the lookup finds exactly one patient, plan again with that ID so the
+ * tool the user actually asked for runs (for example list_patient_notes). Destructive tools are
+ * not planned here: they need the user's confirmation on a plan with concrete IDs.
+ */
+async function planAfterPatientLookup(input: {
+  actor: AuthUser;
+  prompt: string;
+  maxToolCalls: number;
+  history?: ConversationTurn[];
+  calls: IAgentToolCall[];
+  results: ExecutedToolResult[];
+}): Promise<IAgentToolCall[]> {
+  const onlyLookups = input.calls.length > 0 && input.calls.every((call) => PATIENT_LOOKUP_TOOLS.has(call.tool));
+  const remaining = input.maxToolCalls - input.calls.length;
+  const patientId = onlyLookups ? resolvePatientIdFromExecutionResults(input.results) : null;
+  if (!patientId || remaining < 1) {
+    return [];
+  }
+
+  const followUpPrompt = [
+    input.prompt,
+    `Patient lookup result: the patient's ID is ${patientId}.`,
+    "Plan the tool calls that answer the request with this ID. Do not look the patient up again.",
+  ].join("\n\n");
+
+  try {
+    const planner = await planToolCalls(input.actor, followUpPrompt, remaining, input.history);
+    return normalizePlannedToolCalls(input.prompt, planner.parsed.toolCalls as IAgentToolCall[]).filter(
+      (call) => !PATIENT_LOOKUP_TOOLS.has(call.tool) && !isToolDestructive(call.tool),
+    );
+  } catch (error) {
+    console.error(`[Agent] Second planning turn failed: ${extractErrorMessage(error)}`);
+    return [];
+  }
+}
+
 async function executeCalls(
   actor: AuthUser,
   prompt: string,
@@ -978,15 +1054,20 @@ export const agentService = {
           planner.parsed.finalMessage ??
           "No direct tool execution was planned. Provide patient context for more precise retrieval when needed.";
 
+        const written =
+          executionResults.length > 0
+            ? await writeAnswer(input.actor, input.prompt, executionResults, input.history)
+            : null;
+
         const finalMessage =
-          autoChainedToolCalls.length > 0
-            ? "Planner returned no explicit tool calls, so an automatic medical-record retrieval was executed using available patient context. Review tool results for details."
-            : autoRetrievalError
-              ? `${baseFinalMessage} Automatic retrieval attempt failed: ${autoRetrievalError}.`
-              : baseFinalMessage;
+          written?.text ??
+          (autoRetrievalError
+            ? `${baseFinalMessage} Automatic retrieval attempt failed: ${autoRetrievalError}.`
+            : baseFinalMessage);
 
         const responsePayload = {
           provider: planner.provider,
+          writerProvider: written ? written.provider : planner.provider,
           requiresConfirmation: false,
           plannerFallbackUsed: planner.fallbackUsed,
           finalMessage,
@@ -1058,6 +1139,20 @@ export const agentService = {
       }
 
       const executionResults = await executeCalls(input.actor, input.prompt, calls);
+
+      const followUpCalls = await planAfterPatientLookup({
+        actor: input.actor,
+        prompt: input.prompt,
+        maxToolCalls: input.maxToolCalls,
+        history: input.history,
+        calls,
+        results: executionResults,
+      });
+      if (followUpCalls.length > 0) {
+        executionResults.push(...(await executeCalls(input.actor, input.prompt, followUpCalls)));
+        calls.push(...followUpCalls);
+      }
+
       const autoChainedToolCalls: IAgentToolCall[] = [];
       let autoRecordSearchError: string | null = null;
 
@@ -1101,38 +1196,22 @@ export const agentService = {
         success: true,
       });
 
-      let synthesizedSummary: string | null = null;
-      if (executionResults.length > 0) {
-        try {
-          const synthesisPrompt = buildSynthesisPrompt(input.actor, input.prompt, executionResults, input.history);
-          const synthesisResult = await llmRouter.generate(synthesisPrompt, {
-            retriesPerProvider: 1,
-            retryBaseDelayMs: env.LLM_RETRY_BASE_DELAY_MS,
-          });
-          synthesizedSummary = synthesisResult.text;
-        } catch {
-          // synthesis is best-effort; fall through to planner finalMessage
-        }
-      }
+      const written =
+        executionResults.length > 0
+          ? await writeAnswer(input.actor, input.prompt, executionResults, input.history)
+          : null;
 
       const responsePayload = {
         provider: planner.provider,
+        writerProvider: written ? written.provider : planner.provider,
         requiresConfirmation: false,
         plannerFallbackUsed: planner.fallbackUsed,
         plannedToolCalls: calls,
         autoChainedToolCalls,
+        autoRecordSearchError: autoRecordSearchError ?? undefined,
         results: executionResults,
         finalMessage:
-          synthesizedSummary ??
-          (autoChainedToolCalls.length > 0
-            ? "Tools executed successfully, including an automatic medical-record retrieval based on available patient context. Review tool results for details."
-            : autoRecordSearchError
-              ? `${
-                  planner.parsed.finalMessage ??
-                  "Tools executed successfully. Review tool results for details."
-                } Automatic retrieval attempt failed: ${autoRecordSearchError}.`
-            : planner.parsed.finalMessage ??
-              "Tools executed successfully. Review tool results for details."),
+          written?.text ?? planner.parsed.finalMessage ?? "Tools executed successfully, but returned no data.",
       };
 
       if (idempotencyRecordId) {
@@ -1272,25 +1351,15 @@ export const agentService = {
         success: true,
       });
 
-      let synthesizedSummary: string | null = null;
-      if (executionResults.length > 0) {
-        try {
-          const synthesisPrompt = buildSynthesisPrompt(input.actor, pending.prompt, executionResults);
-          const synthesisResult = await llmRouter.generate(synthesisPrompt, {
-            retriesPerProvider: 1,
-            retryBaseDelayMs: env.LLM_RETRY_BASE_DELAY_MS,
-          });
-          synthesizedSummary = synthesisResult.text;
-        } catch {
-          // synthesis is best-effort
-        }
-      }
+      const written =
+        executionResults.length > 0 ? await writeAnswer(input.actor, pending.prompt, executionResults) : null;
 
       const responsePayload = {
         pendingActionId: pending._id.toString(),
         status: "executed",
+        writerProvider: written?.provider ?? null,
         results: executionResults,
-        message: synthesizedSummary ?? "Pending action confirmed and executed successfully.",
+        message: written?.text ?? "Pending action confirmed and executed successfully.",
       };
 
       if (idempotencyRecordId) {
