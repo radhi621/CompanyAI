@@ -375,6 +375,11 @@ function buildSynthesisPrompt(actor: AuthUser, prompt: string, results: Executed
       "and the record's full ID as the last column, written in backticks (e.g. `6ac7f8e295fc5deac8262ee7`).",
       "Never shorten IDs: follow-up requests rely on them.",
     ].join(" "),
+    [
+      "Write tables compactly: exactly one space on each side of every cell, never pad cells with extra spaces",
+      "to line columns up, and keep the separator row as | --- | --- |.",
+      "Example row: | 2026-10-09 | Dr Youssef Amrani | Follow-up in 3 months | `6ac7f8e295fc5deac8262ee7` |",
+    ].join(" "),
     "Use a dash (—) for missing values, dates as YYYY-MM-DD, and keep cell text short.",
     "A single record can be shown as a short bold-labelled list instead of a table.",
     "Start with a one-line count or summary (e.g. 'Total patients: 5'), then the table.",
