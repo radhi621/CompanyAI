@@ -82,6 +82,8 @@ Required keys:
 - LLM_RETRIES_PER_PROVIDER (default 2)
 - LLM_RETRY_BASE_DELAY_MS (default 250)
 - AGENT_IDEMPOTENCY_TTL_MINUTES (default 1440)
+- AGENT_RATE_LIMIT_PER_MINUTE (default 20): assistant requests per user per minute
+- AI_RECORD_RATE_LIMIT_PER_HOUR (default 60): AI record uploads, replacements and generations per user per hour
 - JWT_ACCESS_SECRET
 - JWT_REFRESH_SECRET
 - BOOTSTRAP_ADMIN_KEY
@@ -90,6 +92,10 @@ Required keys:
 - QDRANT_URL
 
 Recommended defaults are already included in .env.example.
+
+## Health check
+
+`GET /health` returns `status` `ok`, `degraded` (Qdrant unreachable: uploaded-file search is unavailable) or `down` (MongoDB unreachable, HTTP 503), with a `checks` object for each dependency.
 
 ## Install and run
 
