@@ -380,9 +380,9 @@ export const aiService = {
     record.updatedBy = new Types.ObjectId(actor.id);
     await record.save();
     try {
-      await ragService.deleteRecordVector(record._id.toString());
+      await ragService.hideRecordVectors(record._id.toString());
     } catch (error) {
-      console.error(`Failed to delete Qdrant vectors for record ${record._id}:`, error instanceof Error ? error.message : String(error));
+      console.error(`Failed to hide Qdrant vectors for record ${record._id}:`, error instanceof Error ? error.message : String(error));
     }
   },
 
@@ -402,9 +402,14 @@ export const aiService = {
     await record.save();
 
     try {
-      await ragService.indexRecord(record);
+      const restoredPoints = await ragService.unhideRecordVectors(record._id.toString());
+      // Records deleted before deletion only hid their points have none left: re-index the
+      // summary at least (the file chunks of such records are gone).
+      if (restoredPoints === 0) {
+        await ragService.indexRecord(record);
+      }
     } catch (error) {
-      console.error(`Failed to re-index restored record ${record._id}:`, error instanceof Error ? error.message : String(error));
+      console.error(`Failed to restore Qdrant vectors for record ${record._id}:`, error instanceof Error ? error.message : String(error));
     }
 
     return record;
