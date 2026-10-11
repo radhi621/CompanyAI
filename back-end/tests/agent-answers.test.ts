@@ -1,5 +1,7 @@
+import { DateTime } from "luxon";
 import { Types } from "mongoose";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { env } from "../src/config/env";
 import { AgentPendingActionModel } from "../src/models/AgentPendingAction";
 import { PatientNoteModel } from "../src/models/PatientNote";
 import { describePendingAction } from "../src/modules/agent/agent.confirmation";
@@ -248,6 +250,9 @@ describe("requests that need several steps", () => {
 describe("describePendingAction", () => {
   it("names the record each action targets, with its date (clinic time), author and text", () => {
     const noteId = "6ac7f8e295fc5deac8262eec";
+    const createdAt = new Date("2026-10-08T09:30:00Z");
+    // Morocco's UTC offset depends on the tz database version, so compute the expected time.
+    const clinicTime = DateTime.fromJSDate(createdAt).setZone(env.APP_TIMEZONE).toFormat("yyyy-MM-dd HH:mm");
     const text = describePendingAction(
       [{ tool: "delete_patient_note", args: { noteId } }],
       [
@@ -256,7 +261,7 @@ describe("describePendingAction", () => {
           args: {},
           result: {
             notes: [
-              { noteId, content: "Reports 3-4 migraine episodes per month.", createdBy: "Nadia Bennani", createdAt: new Date("2026-10-08T09:30:00Z") },
+              { noteId, content: "Reports 3-4 migraine episodes per month.", createdBy: "Nadia Bennani", createdAt },
             ],
           },
         },
@@ -264,7 +269,7 @@ describe("describePendingAction", () => {
     );
 
     expect(text).toContain(
-      `- **delete_patient_note**: noteId \`${noteId}\` (2026-10-08 10:30, Nadia Bennani, "Reports 3-4 migraine episodes per month.")`,
+      `- **delete_patient_note**: noteId \`${noteId}\` (${clinicTime}, Nadia Bennani, "Reports 3-4 migraine episodes per month.")`,
     );
   });
 
