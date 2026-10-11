@@ -32,6 +32,8 @@ interface PatientPanelProps {
   currentUser: { id: string; role: UserRole };
   /** Patient to open by default, e.g. the active patient chat folder. */
   preferredPatientId?: string | null;
+  /** Changes when data changed elsewhere (e.g. an approved chat action), to reload. */
+  refreshKey?: number;
 }
 
 interface EditForm {
@@ -73,7 +75,7 @@ function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
 }
 
-export default function PatientPanel({ request, currentUser, preferredPatientId }: PatientPanelProps) {
+export default function PatientPanel({ request, currentUser, preferredPatientId, refreshKey = 0 }: PatientPanelProps) {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string>("");
@@ -141,6 +143,21 @@ export default function PatientPanel({ request, currentUser, preferredPatientId 
     }, 0);
     return () => window.clearTimeout(timerId);
   }, [activePatientId, loadPatient]);
+
+  // Reload after a change made elsewhere, keeping any edit in progress.
+  useEffect(() => {
+    if (refreshKey === 0) {
+      return;
+    }
+
+    const timerId = window.setTimeout(() => {
+      void loadPatients();
+      if (activePatientId) {
+        void loadPatient(activePatientId);
+      }
+    }, 0);
+    return () => window.clearTimeout(timerId);
+  }, [refreshKey, activePatientId, loadPatients, loadPatient]);
 
   const filteredPatients = useMemo(() => {
     const term = search.trim().toLowerCase();

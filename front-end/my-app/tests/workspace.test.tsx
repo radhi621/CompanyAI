@@ -11,12 +11,13 @@ const formEvent = { preventDefault: () => {} } as FormEvent<HTMLFormElement>;
 function renderWorkspace(apiRequest: ApiRequest = vi.fn() as unknown as ApiRequest) {
   const setBusy = vi.fn();
   const setFeedback = vi.fn();
+  const onDataChanged = vi.fn();
   const hook = renderHook(() => {
     const workspace = useWorkspace(setFeedback);
-    const chat = useAgentChat({ apiRequest, workspace, setBusy, setFeedback });
+    const chat = useAgentChat({ apiRequest, workspace, setBusy, setFeedback, onDataChanged });
     return { workspace, chat };
   });
-  return { ...hook, setBusy, setFeedback };
+  return { ...hook, setBusy, setFeedback, onDataChanged };
 }
 
 function requestBody(apiRequest: ReturnType<typeof vi.fn>, callIndex: number) {
@@ -118,10 +119,11 @@ describe("agent chat", () => {
           }
         : { pendingActionId: "aaaaaaaaaaaaaaaaaaaaaaaa", status: "executed", message: "Note deleted." },
     );
-    const { result } = renderWorkspace(apiRequest as unknown as ApiRequest);
+    const { result, onDataChanged } = renderWorkspace(apiRequest as unknown as ApiRequest);
 
     act(() => result.current.chat.setPromptInput("Delete note n1"));
     await act(() => result.current.chat.handleSendPrompt(formEvent));
+    expect(onDataChanged).not.toHaveBeenCalled();
 
     expect(result.current.workspace.activeConversation.pendingAction?.plannedToolCalls[0].tool).toBe(
       "delete_patient_note",
@@ -132,6 +134,8 @@ describe("agent chat", () => {
     expect(apiRequest.mock.calls[1][0]).toBe("/agent/actions/aaaaaaaaaaaaaaaaaaaaaaaa/confirm");
     expect(requestBody(apiRequest, 1)).toEqual({ approved: true });
     expect(result.current.workspace.activeConversation.pendingAction).toBeNull();
+    // The calendar and patient panel reload after an action ran.
+    expect(onDataChanged).toHaveBeenCalledTimes(1);
   });
 
   it("removes Approve/Reject when the approved action fails, so it cannot be retried in a loop", async () => {

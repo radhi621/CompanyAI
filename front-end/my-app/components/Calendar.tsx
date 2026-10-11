@@ -53,9 +53,11 @@ interface CalendarProps {
   refreshAccessToken?: () => Promise<string | null>;
   /** Admins may book outside a doctor's working hours. */
   isAdmin?: boolean;
+  /** Changes when data changed elsewhere (e.g. an approved chat action), to reload the month. */
+  refreshKey?: number;
 }
 
-export default function Calendar({ token, refreshAccessToken, isAdmin = false }: CalendarProps) {
+export default function Calendar({ token, refreshAccessToken, isAdmin = false, refreshKey = 0 }: CalendarProps) {
   const today = useMemo(() => {
     const d = new Date();
     d.setHours(0, 0, 0, 0);
@@ -116,7 +118,7 @@ export default function Calendar({ token, refreshAccessToken, isAdmin = false }:
     }, 0);
 
     return () => window.clearTimeout(timerId);
-  }, [fetchAppointments]);
+  }, [fetchAppointments, refreshKey]);
 
   const year = viewDate.getFullYear();
   const month = viewDate.getMonth();
