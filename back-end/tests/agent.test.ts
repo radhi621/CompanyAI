@@ -67,7 +67,7 @@ describe("tool access", () => {
 });
 
 describe("destructive actions", () => {
-  it("refuses to plan a confirmation whose arguments are not concrete", async () => {
+  it("never asks to confirm an action whose arguments are not concrete", async () => {
     stubPlanner({
       toolCalls: [
         { tool: "search_patient", args: { name: "Ana" } },
@@ -81,9 +81,20 @@ describe("destructive actions", () => {
 
     const res = await api().post(`${API}/agent/execute`).set(auth(secretary)).send({ prompt: "Book Ana tomorrow at 10" });
 
+    // The lookup runs; the appointment, whose patient was never found, is reported, not queued.
+    expect(res.status).toBe(200);
+    expect(res.body.data.requiresConfirmation).toBe(false);
+    expect(res.body.data.finalMessage).toMatch(/could not prepare the create_appointment action/i);
+    expect(await AgentPendingActionModel.countDocuments()).toBe(before);
+  });
+
+  it("still refuses a lone action whose arguments are not concrete", async () => {
+    stubPlanner({ toolCalls: [{ tool: "cancel_appointment", args: { appointmentId: "<APPOINTMENT_ID>" } }] });
+
+    const res = await api().post(`${API}/agent/execute`).set(auth(secretary)).send({ prompt: "Cancel that appointment" });
+
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/missing concrete details/i);
-    expect(await AgentPendingActionModel.countDocuments()).toBe(before);
   });
 
   it("asks for confirmation, executes once under concurrent confirms, and keeps existing notes", async () => {

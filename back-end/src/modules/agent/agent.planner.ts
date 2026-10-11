@@ -7,8 +7,13 @@ import type { AuthUser } from "../../types/auth";
 import { ApiError } from "../../utils/apiError";
 import { llmRouter } from "../../services/llm/llmRouter";
 import { normalizePlannedToolCalls, resolvePatientIdFromExecutionResults } from "./agent.patientContext";
-import { buildNoToolFallbackPrompt, buildPlannerPrompt, buildPlannerRepairPrompt } from "./agent.prompts";
-import { isToolAllowedForRole, isToolDestructive } from "./agent.tools";
+import {
+  buildFollowUpPrompt,
+  buildNoToolFallbackPrompt,
+  buildPlannerPrompt,
+  buildPlannerRepairPrompt,
+} from "./agent.prompts";
+import { isToolAllowedForRole } from "./agent.tools";
 import { type ConversationTurn, type ExecutedToolResult, extractErrorMessage } from "./agent.types";
 
 const MAX_PLANNER_OUTPUT_CHARS = 60_000;
@@ -33,6 +38,8 @@ const plannerResponseSchema = z
     thought: z.string().max(3000).optional(),
     toolCalls: z.array(plannerToolCallSchema).max(10).default([]),
     finalMessage: z.string().max(6000).optional(),
+    // true when these calls only find IDs the request needs: plan again with their results.
+    followUp: z.boolean().optional(),
   })
   .strict();
 
@@ -193,8 +200,9 @@ export async function planToolCalls(
     retriesPerProvider: env.LLM_RETRIES_PER_PROVIDER,
     retryBaseDelayMs: env.LLM_RETRY_BASE_DELAY_MS,
   };
+  const jsonOptions = { ...llmOptions, json: true };
 
-  const primaryPlanner = await llmRouter.generate(plannerPrompt, llmOptions);
+  const primaryPlanner = await llmRouter.generate(plannerPrompt, jsonOptions);
 
   try {
     const parsed = parsePlannerResponse(primaryPlanner.text);
@@ -219,7 +227,7 @@ export async function planToolCalls(
       extractErrorMessage(primaryParseError),
       history,
     );
-    const repairedPlanner = await llmRouter.generate(repairPrompt, llmOptions);
+    const repairedPlanner = await llmRouter.generate(repairPrompt, jsonOptions);
 
     try {
       const parsed = parsePlannerResponse(repairedPlanner.text);
@@ -254,40 +262,58 @@ export async function planToolCalls(
 
 const PATIENT_LOOKUP_TOOLS = new Set<string>(["search_patient", "list_patients"]);
 
+/** More planning turns run only when the previous one asked for them (or only looked a patient up). */
+export function wantsAnotherTurn(planner: PlannerOutcome, calls: IAgentToolCall[]): boolean {
+  if (planner.parsed.followUp === true) {
+    return true;
+  }
+  return calls.length > 0 && calls.every((call) => PATIENT_LOOKUP_TOOLS.has(call.tool));
+}
+
+export interface NextStep {
+  calls: IAgentToolCall[];
+  followUp: boolean;
+  raw: string;
+}
+
 /**
- * Second planning turn. When the user names a patient instead of giving an ID, the planner can
- * only plan the lookup. Once the lookup finds exactly one patient, plan again with that ID so the
- * tool the user actually asked for runs (for example list_patient_notes). Destructive tools are
- * not planned here: they need the user's confirmation on a plan with concrete IDs.
+ * A further planning turn, with the results so far. Requests that name a patient or a record
+ * need their IDs looked up first (for example: find the patient, list her notes, then delete
+ * the last one), so the planner continues from what the earlier calls returned. Calls already
+ * made are not repeated. Destructive calls are returned like any other; the caller sends them
+ * to the user for confirmation.
  */
-export async function planAfterPatientLookup(input: {
+export async function planNextStep(input: {
   actor: AuthUser;
   prompt: string;
-  maxToolCalls: number;
+  remainingToolCalls: number;
   history?: ConversationTurn[];
   calls: IAgentToolCall[];
   results: ExecutedToolResult[];
-}): Promise<IAgentToolCall[]> {
-  const onlyLookups = input.calls.length > 0 && input.calls.every((call) => PATIENT_LOOKUP_TOOLS.has(call.tool));
-  const remaining = input.maxToolCalls - input.calls.length;
-  const patientId = onlyLookups ? resolvePatientIdFromExecutionResults(input.results) : null;
-  if (!patientId || remaining < 1) {
-    return [];
+}): Promise<NextStep> {
+  if (input.remainingToolCalls < 1) {
+    return { calls: [], followUp: false, raw: "" };
   }
 
-  const followUpPrompt = [
+  const followUpPrompt = buildFollowUpPrompt(
     input.prompt,
-    `Patient lookup result: the patient's ID is ${patientId}.`,
-    "Plan the tool calls that answer the request with this ID. Do not look the patient up again.",
-  ].join("\n\n");
+    input.results,
+    resolvePatientIdFromExecutionResults(input.results),
+  );
 
   try {
-    const planner = await planToolCalls(input.actor, followUpPrompt, remaining, input.history);
-    return normalizePlannedToolCalls(input.prompt, planner.parsed.toolCalls as IAgentToolCall[]).filter(
-      (call) => !PATIENT_LOOKUP_TOOLS.has(call.tool) && !isToolDestructive(call.tool),
+    const planner = await planToolCalls(input.actor, followUpPrompt, input.remainingToolCalls, input.history);
+    const done = new Set(input.calls.map(callKey));
+    const calls = normalizePlannedToolCalls(input.prompt, planner.parsed.toolCalls as IAgentToolCall[]).filter(
+      (call) => !done.has(callKey(call)),
     );
+    return { calls, followUp: planner.parsed.followUp === true, raw: planner.raw };
   } catch (error) {
-    console.error(`[Agent] Second planning turn failed: ${extractErrorMessage(error)}`);
-    return [];
+    console.error(`[Agent] Follow-up planning turn failed: ${extractErrorMessage(error)}`);
+    return { calls: [], followUp: false, raw: "" };
   }
+}
+
+function callKey(call: IAgentToolCall): string {
+  return `${call.tool}:${JSON.stringify(call.args ?? {})}`;
 }

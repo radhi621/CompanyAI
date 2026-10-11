@@ -1,6 +1,17 @@
 import { ApiError } from "../../utils/apiError";
 
 /** Output token limit for chat answers; thinking tokens of Gemini 2.5 models count toward it. */
+export interface GenerateTextOptions {
+  /**
+   * The prompt asks for a JSON object (the planner). The provider is put in JSON mode, which
+   * also stops gpt-oss on Groq from sometimes ending after its reasoning with empty content.
+   */
+  json?: boolean;
+}
+
+/** Lower than for written answers: a plan should be the same each time for the same request. */
+export const JSON_TEMPERATURE = 0.2;
+
 export const MAX_OUTPUT_TOKENS = 4096;
 
 /** Thinking cap for Gemini 2.5 models, so thinking cannot use up the whole output limit. */

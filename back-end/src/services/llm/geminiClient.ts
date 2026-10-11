@@ -1,7 +1,13 @@
 import { GoogleGenAI } from "@google/genai";
 import { env } from "../../config/env";
 import { ApiError } from "../../utils/apiError";
-import { GEMINI_THINKING_BUDGET, MAX_OUTPUT_TOKENS, finalizeLlmText } from "./llmOutput";
+import {
+  GEMINI_THINKING_BUDGET,
+  type GenerateTextOptions,
+  JSON_TEMPERATURE,
+  MAX_OUTPUT_TOKENS,
+  finalizeLlmText,
+} from "./llmOutput";
 
 const gemini = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
 
@@ -19,7 +25,7 @@ function errorMessage(error: unknown): string {
 }
 
 export const geminiClient = {
-  async generateText(prompt: string): Promise<string> {
+  async generateText(prompt: string, options: GenerateTextOptions = {}): Promise<string> {
     let response: Awaited<ReturnType<typeof gemini.models.generateContent>>;
 
     try {
@@ -28,7 +34,8 @@ export const geminiClient = {
         contents: prompt,
         config: {
           maxOutputTokens: MAX_OUTPUT_TOKENS,
-          temperature: 0.7,
+          temperature: options.json ? JSON_TEMPERATURE : 0.7,
+          ...(options.json ? { responseMimeType: "application/json" } : {}),
           // Only 2.5 models take a thinking budget; older models reject the setting.
           ...(/gemini-2\.5/.test(env.GEMINI_MODEL)
             ? { thinkingConfig: { thinkingBudget: GEMINI_THINKING_BUDGET } }

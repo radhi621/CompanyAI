@@ -27,13 +27,19 @@ export function buildPlannerPrompt(actor: AuthUser, prompt: string, maxToolCalls
     "For informational questions about patient state/history/findings, prefer retrieval tools when patient context can be resolved.",
     `Limit planned tool calls to at most ${maxToolCalls}.`,
     "Return only a JSON object with this exact shape:",
-    '{"thought":"optional","toolCalls":[{"tool":"...","args":{},"reason":"optional"}],"finalMessage":"optional"}',
+    '{"thought":"optional","toolCalls":[{"tool":"...","args":{},"reason":"optional"}],"finalMessage":"optional","followUp":false}',
     // The answer the user reads is written later from the tool results, so a finalMessage written
     // before any data exists is only used when no tools are needed.
     "Leave finalMessage out when you plan tool calls. When no tools are needed, finalMessage is the complete answer to the user, in Markdown.",
     "Do not wrap JSON in markdown.",
     "Never use symbolic placeholders in args (for example: @search_patient.output.patientId, <PATIENT_ID>, <DOCTOR_ID>).",
     "If an ID is unknown, plan only the discovery call first (for example search_patient) and let the system continue.",
+    [
+      "When the request needs IDs that only tool results can give (for example the ID of the note to delete),",
+      'plan the calls that find them and set "followUp": true; you will be asked again with their results.',
+      "Otherwise leave followUp out.",
+    ].join(" "),
+    "Plan destructive calls (delete, update, cancel) directly; never ask for confirmation yourself: the system asks the user before running them.",
     "Available tools:",
     toolCatalog,
   ];
@@ -45,6 +51,41 @@ export function buildPlannerPrompt(actor: AuthUser, prompt: string, maxToolCalls
   parts.push("User request:", prompt);
 
   return parts.join("\n\n");
+}
+
+const MAX_RESULT_CHARS_FOR_FOLLOW_UP = 3000;
+
+/** The request plus what the earlier tool calls returned, for a further planning turn. */
+export function buildFollowUpPrompt(
+  prompt: string,
+  results: ExecutedToolResult[],
+  patientId: string | null,
+): string {
+  const steps = results.map((entry) => {
+    const result = JSON.stringify(entry.result ?? null);
+    return {
+      tool: entry.tool,
+      args: entry.args,
+      result:
+        result.length > MAX_RESULT_CHARS_FOR_FOLLOW_UP
+          ? `${result.slice(0, MAX_RESULT_CHARS_FOR_FOLLOW_UP)}… (truncated)`
+          : JSON.parse(result),
+    };
+  });
+
+  return [
+    prompt,
+    ...(patientId ? [`Patient lookup result: the patient's ID is ${patientId}.`] : []),
+    "Tool calls already made and their results:",
+    JSON.stringify(steps, null, 2),
+    [
+      "Plan only the remaining tool calls, using the IDs in these results. Do not repeat calls already made",
+      "or look the patient up again. If the request is fully answered, return no tool calls.",
+      "If the request deletes, updates or cancels something, plan that call now with the IDs above.",
+      "Do not ask the user to confirm and do not write a confirmation message yourself: the system shows",
+      "every destructive call to the user for approval before it runs.",
+    ].join(" "),
+  ].join("\n\n");
 }
 
 export function buildPlannerRepairPrompt(

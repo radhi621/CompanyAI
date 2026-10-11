@@ -1,11 +1,11 @@
 import Groq from "groq-sdk";
 import { env } from "../../config/env";
-import { MAX_OUTPUT_TOKENS, finalizeLlmText } from "./llmOutput";
+import { type GenerateTextOptions, JSON_TEMPERATURE, MAX_OUTPUT_TOKENS, finalizeLlmText } from "./llmOutput";
 
 const groq = new Groq({ apiKey: env.GROQ_API_KEY });
 
 export const groqClient = {
-  async generateText(prompt: string): Promise<string> {
+  async generateText(prompt: string, options: GenerateTextOptions = {}): Promise<string> {
     const completion = await groq.chat.completions.create({
       model: env.GROQ_MODEL,
       messages: [
@@ -20,7 +20,8 @@ export const groqClient = {
         },
       ],
       max_tokens: MAX_OUTPUT_TOKENS,
-      temperature: 0.7,
+      temperature: options.json ? JSON_TEMPERATURE : 0.7,
+      ...(options.json ? { response_format: { type: "json_object" as const } } : {}),
       // gpt-oss models reason before answering, and that counts toward max_tokens.
       ...(env.GROQ_MODEL.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" as const } : {}),
     });
