@@ -53,6 +53,8 @@ export interface IAgentPendingActionDocument extends Document {
   actorId: Types.ObjectId;
   actorRole: UserRole;
   prompt: string;
+  /** The chat the action was asked for in; its outcome is added to that conversation. */
+  conversationId?: string;
   toolCalls: IAgentToolCall[];
   status: "pending" | "approved" | "executed" | "rejected" | "failed";
   expiresAt: Date;
@@ -99,6 +101,10 @@ const agentPendingActionSchema = new Schema<IAgentPendingActionDocument>(
     prompt: {
       type: String,
       required: true,
+    },
+    conversationId: {
+      type: String,
+      trim: true,
     },
     toolCalls: {
       type: [agentToolCallSchema],

@@ -48,22 +48,15 @@ npm run build
 npm run start
 ```
 
-## MVP Features in `app/page.tsx`
+## Features
 
-- Initial admin bootstrap and login
-- Session-aware role display
-- AI-first prompt composer (fetch mode + insert mode)
-- Document upload flow for pdf/doc/docx/xls/xlsx/txt/csv in rag or non_rag mode
-- Prompt shortcuts for common operational actions
-- Multi-turn conversation memory passed to the agent for follow-up prompts
-- Agent execution timeline with raw payload introspection
-- Automatic entity ID memory extracted from AI outputs
-- Pin or unpin remembered entity IDs to influence next prompt context
-- Context controls: on/off memory toggle, preview of context pack, clear conversation
-- Grouped and collapsible context chips (History, Entities, Pending) with per-group include/exclude controls
-- Context presets for fast filtering (Full, History only, Entities only, Pending only)
-- Destructive action confirmation controls (approve/reject)
-- Latest agent response debug panel
+- First-run setup screen, sign-in and role-aware workspace
+- AI chat, global or per patient folder: type a request in plain language (Enter sends, Shift+Enter adds a line)
+  - The backend keeps each chat session's conversation, so follow-up questions refer to earlier answers
+  - Changes to data (create, update, cancel, delete, add a note) show what will change and wait for Approve or Reject
+  - Quick actions insert common requests to complete
+- Patient panel (details, pathologies, notes), calendar of appointments, staff accounts (admin)
+- RAG uploads per patient (list, delete, replace) and global knowledge uploads (admin)
 
 ## Notes
 

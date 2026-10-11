@@ -7,14 +7,9 @@ import { defineTool, objectIdSchema, extractSearchTerms, scoreTextMatch, truncat
 
 export const recordsTools = {
   search_medical_records_RAG: defineTool({
-    description: "Performs semantic search in patient indexed records (RAG)",
+    description: "Searches the text of documents uploaded to a patient's record (lab reports, letters, imaging reports) and of AI summaries. Use for questions about the patient's history, results or documents; not for notes or appointments, which have their own tools.",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: false,
-    argsShape: {
-      patientId: "required MongoDB ObjectId",
-      query: "required string",
-      limit: "optional number",
-    },
     argsSchema: z.object({
       patientId: objectIdSchema,
       query: z.string().min(3).max(2000),
@@ -113,13 +108,9 @@ export const recordsTools = {
     },
   }),
   search_global_knowledge_RAG: defineTool({
-    description: "Performs semantic search in globally indexed RAG knowledge",
+    description: "Searches the clinic's shared medical knowledge documents (protocols, guidelines) uploaded by admins. Use for general medical questions, not for a specific patient.",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: false,
-    argsShape: {
-      query: "required string",
-      limit: "optional number",
-    },
     argsSchema: z.object({
       query: z.string().min(3).max(2000),
       limit: z.coerce.number().int().positive().max(10).default(5),

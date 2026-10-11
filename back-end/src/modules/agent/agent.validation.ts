@@ -2,16 +2,18 @@ import { z } from "zod";
 
 const objectIdSchema = z.string().regex(/^[a-fA-F0-9]{24}$/, "Invalid MongoDB ObjectId");
 
-const conversationTurnSchema = z.object({
-  role: z.enum(["user", "assistant", "system"]),
-  text: z.string().max(8000),
-});
-
 export const executeAgentSchema = z.object({
   body: z.object({
-    prompt: z.string().min(5).max(8000),
-    maxToolCalls: z.coerce.number().int().min(1).max(5).default(3),
-    history: z.array(conversationTurnSchema).max(100).optional(),
+    prompt: z.string().trim().min(1).max(8000),
+    // The frontend's chat session ID: messages with the same ID share one conversation.
+    conversationId: z
+      .string()
+      .trim()
+      .min(1)
+      .max(120)
+      .regex(/^[A-Za-z0-9_.:-]+$/, "Invalid conversation ID"),
+    // The patient folder the chat belongs to, if any.
+    patientId: objectIdSchema.optional(),
   }),
 });
 

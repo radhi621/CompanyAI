@@ -3,18 +3,22 @@ import { geminiClient } from "../src/services/llm/geminiClient";
 import { groqClient } from "../src/services/llm/groqClient";
 import { llmRouter } from "../src/services/llm/llmRouter";
 
-vi.mock("../src/services/llm/geminiClient", () => ({ geminiClient: { generateText: vi.fn() } }));
-vi.mock("../src/services/llm/groqClient", () => ({ groqClient: { generateText: vi.fn() } }));
+vi.mock("../src/services/llm/geminiClient", () => ({ geminiClient: { generateText: vi.fn(), chat: vi.fn() } }));
+vi.mock("../src/services/llm/groqClient", () => ({ groqClient: { generateText: vi.fn(), chat: vi.fn() } }));
 
 const QUOTA_ERROR = new Error('Gemini generation failed: {"code":429,"retryDelay":"81941s"}');
 
 describe("llmRouter", () => {
-  it("passes JSON mode to the provider", async () => {
-    vi.mocked(geminiClient.generateText).mockResolvedValue('{"toolCalls":[]}');
+  it("falls back to the next provider for a chat turn", async () => {
+    const request = { system: "s", messages: [{ role: "user" as const, text: "hi" }], tools: [] };
+    vi.mocked(geminiClient.chat).mockRejectedValue(QUOTA_ERROR);
+    vi.mocked(groqClient.chat).mockResolvedValue({ text: "Hello.", toolCalls: [] });
 
-    await llmRouter.generate("plan", { json: true, retriesPerProvider: 1 });
+    const reply = await llmRouter.chat(request, { retriesPerProvider: 2, retryBaseDelayMs: 50 });
 
-    expect(geminiClient.generateText).toHaveBeenCalledWith("plan", { json: true });
+    expect(reply).toEqual({ provider: "groq", turn: { text: "Hello.", toolCalls: [] } });
+    // A daily quota is not retried: one Gemini attempt, then Groq.
+    expect(geminiClient.chat).toHaveBeenCalledTimes(1);
   });
 
   it("does not blame rate limits when another provider failed for a different reason", async () => {

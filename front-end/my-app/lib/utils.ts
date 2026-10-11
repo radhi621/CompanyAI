@@ -1,4 +1,4 @@
-import type { AgentConfirmResult, AgentExecutionResult, AgentToolCall, ChatScope, MessageRole, PatientFolder, PromptMode, UserRole } from "./types";
+import type { AgentConfirmResult, AgentExecutionResult, AgentToolCall, MessageRole, UserRole } from "./types";
 import { API_BASE_URL } from "./config";
 
 export function createId(prefix: string): string {
@@ -99,14 +99,8 @@ export function sanitizeToolCalls(value: unknown): AgentToolCall[] {
 
 export function summarizeExecutionResult(result: AgentExecutionResult): string {
   if (result.requiresConfirmation && result.pendingActionId) {
-    const callSummary = sanitizeToolCalls(result.plannedToolCalls)
-      .map((call) => call.tool)
-      .join(", ");
-
-    const callLine = callSummary ? `Planned tools: ${callSummary}.` : "";
-    return [result.message ?? "This action requires confirmation before execution.", callLine]
-      .filter((line) => line.length > 0)
-      .join(" ");
+    // The message names each action and the record it changes.
+    return result.message ?? "This action needs your approval before it runs.";
   }
 
   const readableLines: string[] = [];
@@ -130,36 +124,6 @@ export function summarizeExecutionResult(result: AgentExecutionResult): string {
 
 export function summarizeConfirmResult(result: AgentConfirmResult): string {
   return result.message ?? "Pending action confirmed and executed successfully.";
-}
-
-export function buildPromptWithMode(input: {
-  mode: PromptMode;
-  prompt: string;
-  scope: ChatScope;
-  folder?: PatientFolder;
-}): string {
-  const modeInstruction =
-    input.mode === "fetch"
-      ? "Mode: Fetch and summarize data only unless the user explicitly requests mutation."
-      : "Mode: Insert or update data when needed. If destructive, require pending confirmation.";
-
-  const ragScopeInstruction =
-    input.scope === "global"
-      ? [
-          "RAG Scope:",
-          "- Primary: Global Knowledge RAG",
-          "- Use tool search_global_knowledge_RAG when contextual evidence is needed.",
-        ].join("\n")
-      : [
-          "RAG Scope:",
-          "- Primary: Patient-specific RAG for the active patient folder",
-          "- Secondary fallback: Global Knowledge RAG",
-          "- Use search_medical_records_RAG with this patientId first, then search_global_knowledge_RAG if needed.",
-          `- Active patientId: ${input.folder?.patientId ?? "unknown"}`,
-          `- Active folder: ${input.folder?.name ?? "unknown"}`,
-        ].join("\n");
-
-  return [modeInstruction, ragScopeInstruction, "Current user request:", input.prompt].join("\n\n");
 }
 
 export function roleBadgeClass(role: UserRole): string {

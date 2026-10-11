@@ -1,4 +1,3 @@
-import type { PromptMode } from "./types";
 
 export const DEFAULT_API_BASE_URL = "http://localhost:4000/api/v1";
 export const TOKEN_STORAGE_KEY = "mediassist_access_token";
@@ -17,99 +16,29 @@ export const WORKSPACE_STORAGE_KEYS = [
 ];
 export const GLOBAL_CONVERSATION_ID = "__global__";
 
-export const QUICK_ACTIONS: Array<{ title: string; mode: PromptMode; prompt: string }> = [
-  {
-    title: "Today schedule",
-    mode: "fetch",
-    prompt: "Show me today schedule in Africa/Casablanca and summarize by doctor.",
-  },
-  {
-    title: "List patients",
-    mode: "fetch",
-    prompt: "List all accessible patients with IDs, CIN, and key profile fields.",
-  },
-  {
-    title: "Find by CIN",
-    mode: "fetch",
-    prompt: "Find patient by CIN AB123456 and show basic profile.",
-  },
-  {
-    title: "Patient summary",
-    mode: "fetch",
-    prompt: "Get full summary for patient <PATIENT_ID>.",
-  },
-  {
-    title: "List appointments",
-    mode: "fetch",
-    prompt: "List all upcoming appointments with patient name, doctor, date, and status.",
-  },
-  {
-    title: "Check availability",
-    mode: "fetch",
-    prompt: "Check availability for doctor <DOCTOR_ID> on 2026-05-25.",
-  },
-  {
-    title: "List doctors",
-    mode: "fetch",
-    prompt: "List all doctors with specialty, license number, and active status.",
-  },
-  {
-    title: "Uncontacted patients",
-    mode: "fetch",
-    prompt: "List patients without recent contact in my department.",
-  },
-  {
-    title: "Patient notes",
-    mode: "fetch",
-    prompt: "List all notes for patient <PATIENT_ID>.",
-  },
-  {
-    title: "Search medical records",
-    mode: "fetch",
-    prompt: "Search medical records for patient <PATIENT_ID> with keyword <KEYWORD>.",
-  },
-  {
-    title: "Search global knowledge",
-    mode: "fetch",
-    prompt: "Search global medical knowledge about <TOPIC>.",
-  },
-  {
-    title: "Create patient",
-    mode: "insert",
-    prompt:
-      "Create a patient with first name Youssef, last name Amrani, CIN AB123456, phone +212600000000, email youssef.amrani@example.com, and pathologies hypertension and asthma.",
-  },
-  {
-    title: "Update patient",
-    mode: "insert",
-    prompt: "Update patient <PATIENT_ID> with new phone +212600000001.",
-  },
-  {
-    title: "Create appointment",
-    mode: "insert",
-    prompt:
-      "Create an appointment for patient <PATIENT_ID> with doctor <DOCTOR_ID> on 2026-04-20 at 10:00 for post-op follow up, 60 minutes.",
-  },
-  {
-    title: "Cancel appointment",
-    mode: "insert",
-    prompt: "Cancel appointment <APPOINTMENT_ID> due to patient rescheduling.",
-  },
-  {
-    title: "Add patient note",
-    mode: "insert",
-    prompt: "Add a note for patient <PATIENT_ID>: <NOTE_TEXT>.",
-  },
-  {
-    title: "Delete patient note",
-    mode: "insert",
-    prompt: "Delete patient note <NOTE_ID>.",
-  },
-  {
-    title: "Create doctor profile",
-    mode: "insert",
-    prompt: "Create a doctor profile for <NAME>, specialty <SPECIALTY>, license number <LICENSE>.",
-  },
+/**
+ * Starting points for common requests. "{patient}" becomes "this patient" in a patient folder
+ * and "patient [name]" in the global chat; bracketed parts are for the user to fill in.
+ */
+export const QUICK_ACTIONS: Array<{ title: string; prompt: string }> = [
+  { title: "Today schedule", prompt: "Show today's schedule, grouped by doctor." },
+  { title: "List patients", prompt: "List all my patients." },
+  { title: "Find by CIN", prompt: "Find the patient with CIN [CIN]." },
+  { title: "Patient summary", prompt: "Give me a summary of {patient}." },
+  { title: "List appointments", prompt: "List the upcoming appointments of {patient}." },
+  { title: "Check availability", prompt: "Is Dr [name] available on [date] at [time]?" },
+  { title: "List doctors", prompt: "List all doctors with their specialty." },
+  { title: "Uncontacted patients", prompt: "Which patients have not been contacted in the last 30 days?" },
+  { title: "Patient notes", prompt: "List the notes of {patient}." },
+  { title: "Search medical records", prompt: "What do the uploaded documents of {patient} say about [topic]?" },
+  { title: "Search global knowledge", prompt: "What do our medical guidelines say about [topic]?" },
+  { title: "Create patient", prompt: "Create a patient: [first name] [last name], CIN [CIN], phone [phone]." },
+  { title: "Update patient", prompt: "Change the phone number of {patient} to [phone]." },
+  { title: "Create appointment", prompt: "Book {patient} with Dr [name] on [date] at [time] for [reason]." },
+  { title: "Cancel appointment", prompt: "Cancel the next appointment of {patient}." },
+  { title: "Add patient note", prompt: "Add a note to {patient}: [note]." },
+  { title: "Delete patient note", prompt: "Delete the last note of {patient}." },
+  { title: "Create doctor profile", prompt: "Create a doctor profile for Dr [name], specialty [specialty], license [number]." },
 ];
 
 export function normalizeApiBaseUrl(rawValue: string | undefined): string {

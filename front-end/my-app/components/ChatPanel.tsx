@@ -2,9 +2,9 @@
 
 import type { Dispatch, FormEvent, RefObject, SetStateAction } from "react";
 import MarkdownMessage from "./MarkdownMessage";
-import type { ChatScope, ChatSession, PatientFolder, PromptMode } from "../lib/types";
+import type { ChatScope, ChatSession, PatientFolder } from "../lib/types";
 import { formatDateTime, messageBubbleClass } from "../lib/utils";
-import { ControlsIcon, FetchIcon, InsertIcon, QuickActionsIcon, ToolLimitIcon, quickActionIcon } from "../components/icons";
+import { QuickActionsIcon, quickActionIcon } from "../components/icons";
 
 interface ChatPanelProps {
   chatScope: ChatScope;
@@ -17,12 +17,8 @@ interface ChatPanelProps {
   canSendPrompt: boolean;
   promptInput: string;
   setPromptInput: Dispatch<SetStateAction<string>>;
-  promptMode: PromptMode;
-  setPromptMode: Dispatch<SetStateAction<PromptMode>>;
-  maxToolCalls: number;
-  setMaxToolCalls: Dispatch<SetStateAction<number>>;
-  quickActions: Array<{ title: string; mode: PromptMode; prompt: string }>;
-  handleQuickAction: (action: { mode: PromptMode; prompt: string }) => void;
+  quickActions: Array<{ title: string; prompt: string }>;
+  handleQuickAction: (action: { prompt: string }) => void;
   handleSendPrompt: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   handleConfirmPendingAction: (approved: boolean) => Promise<void>;
   handleNewChat: () => void;
@@ -40,10 +36,6 @@ export default function ChatPanel({
   canSendPrompt,
   promptInput,
   setPromptInput,
-  promptMode,
-  setPromptMode,
-  maxToolCalls,
-  setMaxToolCalls,
   quickActions,
   handleQuickAction,
   handleSendPrompt,
@@ -124,18 +116,11 @@ export default function ChatPanel({
 
       {activePendingAction && (
         <div className="border-t border-[#e3d8c8] bg-[#fff6e6] px-4 py-3">
-          <p className="text-sm font-medium text-[#6f4a00]">Pending destructive action</p>
+          <p className="text-sm font-medium text-[#6f4a00]">Waiting for your approval</p>
           <p className="mt-1 text-xs text-[#7d6440]">
-            ID: {activePendingAction.id}
-            {activePendingAction.expiresAt
-              ? ` | Expires: ${formatDateTime(activePendingAction.expiresAt)}`
-              : ""}
+            The assistant&apos;s last message describes the change. Nothing is changed until you approve it.
+            {activePendingAction.expiresAt ? ` Expires ${formatDateTime(activePendingAction.expiresAt)}.` : ""}
           </p>
-          {activePendingAction.plannedToolCalls.length > 0 && (
-            <p className="mt-1 text-xs text-[#7d6440]">
-              Planned tools: {activePendingAction.plannedToolCalls.map((call) => call.tool).join(", ")}
-            </p>
-          )}
           <div className="mt-3 flex items-center gap-2">
             <button
               type="button"
@@ -163,6 +148,12 @@ export default function ChatPanel({
             <textarea
               value={promptInput}
               onChange={(event) => setPromptInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
+                }
+              }}
               placeholder={
                 chatScope === "global"
                   ? "Message MediAssist globally..."
@@ -176,55 +167,6 @@ export default function ChatPanel({
 
             <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 border-t border-[#eee6d8] pt-1.5">
               <div className="flex items-center gap-1.5">
-                <details className="group relative">
-                  <summary className="flex h-8 w-8 cursor-pointer list-none items-center justify-center rounded-lg border border-[#d9ceb9] bg-[#faf6ee] text-[#6c5e47] hover:bg-white [&::-webkit-details-marker]:hidden">
-                    {ControlsIcon()}
-                    <span className="sr-only">Open main controls</span>
-                  </summary>
-                  <div className="absolute bottom-full left-0 z-20 mb-1.5 w-[270px] rounded-xl border border-[#d8ccb6] bg-[#fffaf1] p-2.5 shadow-[0_8px_20px_rgba(0,0,0,0.08)]">
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#7e7058]">
-                      Main Controls
-                    </p>
-                    <div className="mt-2 inline-flex rounded-lg border border-[#d2c6b1] bg-[#f6f0e4] p-0.5 text-[11px]">
-                      <button
-                        type="button"
-                        onClick={() => setPromptMode("fetch")}
-                        className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${
-                          promptMode === "fetch" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
-                        }`}
-                      >
-                        {FetchIcon()}
-                        Fetch
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setPromptMode("insert")}
-                        className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${
-                          promptMode === "insert" ? "bg-white text-[#2f2a21]" : "text-[#7e715b]"
-                        }`}
-                      >
-                        {InsertIcon()}
-                        Insert
-                      </button>
-                    </div>
-                    <label className="mt-2 inline-flex w-full items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#7e7058]">
-                      {ToolLimitIcon()}
-                      Tool Calls
-                      <select
-                        value={maxToolCalls}
-                        onChange={(event) => setMaxToolCalls(Number(event.target.value))}
-                        className="ml-auto rounded-md border border-[#d4c8b3] bg-white px-2 py-1 text-[11px] text-[#2f2a21]"
-                      >
-                        <option value={1}>1</option>
-                        <option value={2}>2</option>
-                        <option value={3}>3</option>
-                        <option value={4}>4</option>
-                        <option value={5}>5</option>
-                      </select>
-                    </label>
-                  </div>
-                </details>
-
                 <details className="group relative">
                   <summary className="flex h-8 w-8 cursor-pointer list-none items-center justify-center rounded-lg border border-[#d9ceb9] bg-[#faf6ee] text-[#6c5e47] hover:bg-white [&::-webkit-details-marker]:hidden">
                     {QuickActionsIcon()}

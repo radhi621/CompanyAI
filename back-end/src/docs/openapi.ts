@@ -297,9 +297,12 @@ export const openApiDocument = {
     "/agent/execute": {
       post: {
         tags: ["Agent"],
-        summary: "Plan and execute role-aware tool calls from a natural-language prompt",
+        summary: "Send a chat message to the assistant",
         description:
-          "Supports Idempotency-Key header for safe retries. Includes planner repair and no-tool fallback when planner JSON is malformed.",
+          "Body: prompt (the message), conversationId (the chat session; messages with the same ID share one stored " +
+          "conversation, kept 30 days), optional patientId (the chat's patient). The assistant calls tools as needed and " +
+          "answers. Tools that change data are not run: the response has requiresConfirmation, pendingActionId and a " +
+          "message describing the action; confirm it with /agent/actions/{actionId}/confirm. Supports Idempotency-Key.",
         parameters: [
           {
             in: "header",
@@ -317,7 +320,7 @@ export const openApiDocument = {
     "/agent/actions/{actionId}/confirm": {
       post: {
         tags: ["Agent"],
-        summary: "Confirm or reject pending destructive tool execution",
+        summary: "Approve or reject a pending action (the outcome is added to its conversation)",
         description:
           "Supports Idempotency-Key header for safe retries. Only the original requester can confirm.",
         parameters: [

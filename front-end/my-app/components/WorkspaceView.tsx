@@ -174,10 +174,6 @@ export default function WorkspaceView({
           canSendPrompt={canSendPrompt}
           promptInput={chat.promptInput}
           setPromptInput={chat.setPromptInput}
-          promptMode={chat.promptMode}
-          setPromptMode={chat.setPromptMode}
-          maxToolCalls={chat.maxToolCalls}
-          setMaxToolCalls={chat.setMaxToolCalls}
           quickActions={QUICK_ACTIONS}
           handleQuickAction={chat.handleQuickAction}
           handleSendPrompt={chat.handleSendPrompt}

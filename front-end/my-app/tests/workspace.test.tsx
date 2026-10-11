@@ -65,7 +65,7 @@ describe("patient folders", () => {
 });
 
 describe("agent chat", () => {
-  it("sends the previous AI answer as history with a follow-up", async () => {
+  it("sends follow-ups in the same conversation, which the backend remembers", async () => {
     const apiRequest = vi.fn(async () => ({
       requiresConfirmation: false,
       finalMessage: `| Name | ID |\n| --- | --- |\n| Amrani | \`${PATIENT_ID}\` |`,
@@ -78,11 +78,12 @@ describe("agent chat", () => {
     act(() => result.current.chat.setPromptInput("Show the first one"));
     await act(() => result.current.chat.handleSendPrompt(formEvent));
 
-    expect(requestBody(apiRequest, 0).history).toEqual([]);
-    expect(requestBody(apiRequest, 1).history).toEqual([
-      { role: "user", text: "List all patients" },
-      { role: "assistant", text: expect.stringContaining(PATIENT_ID) },
-    ]);
+    // Only the typed text is sent, not instructions around it, and both messages share one conversation.
+    expect(requestBody(apiRequest, 0)).toEqual({ prompt: "List all patients", conversationId: expect.any(String) });
+    expect(requestBody(apiRequest, 1)).toEqual({
+      prompt: "Show the first one",
+      conversationId: requestBody(apiRequest, 0).conversationId,
+    });
     expect(result.current.workspace.activeConversation.messages.map((message) => message.role)).toEqual([
       "user",
       "assistant",
@@ -133,14 +134,30 @@ describe("agent chat", () => {
     expect(result.current.workspace.activeConversation.pendingAction).toBeNull();
   });
 
-  it("fills quick actions with the active patient's ID", () => {
-    const { result } = renderWorkspace();
+  it("sends the folder's patient with each message, and words quick actions for it", async () => {
+    const apiRequest = vi.fn(async () => ({ requiresConfirmation: false, finalMessage: "Summary." }));
+    const { result } = renderWorkspace(apiRequest as unknown as ApiRequest);
 
     act(() => result.current.workspace.setNewFolderForm({ name: "Amrani", patientId: PATIENT_ID }));
     act(() => result.current.workspace.handleCreateFolder(formEvent));
-    act(() => result.current.chat.handleQuickAction({ mode: "fetch", prompt: "Summarize patient <PATIENT_ID>." }));
+    act(() => result.current.chat.handleQuickAction({ prompt: "Give me a summary of {patient}." }));
+    expect(result.current.chat.promptInput).toBe("Give me a summary of this patient.");
 
-    expect(result.current.chat.promptInput).toBe(`Summarize patient ${PATIENT_ID}.`);
+    await act(() => result.current.chat.handleSendPrompt(formEvent));
+    expect(requestBody(apiRequest, 0)).toMatchObject({ prompt: "Give me a summary of this patient.", patientId: PATIENT_ID });
+  });
+
+  it("starts a new conversation for a new session", async () => {
+    const apiRequest = vi.fn(async () => ({ requiresConfirmation: false, finalMessage: "Hello." }));
+    const { result } = renderWorkspace(apiRequest as unknown as ApiRequest);
+
+    act(() => result.current.chat.setPromptInput("Hello there"));
+    await act(() => result.current.chat.handleSendPrompt(formEvent));
+    act(() => result.current.chat.handleNewChat());
+    act(() => result.current.chat.setPromptInput("Hello again"));
+    await act(() => result.current.chat.handleSendPrompt(formEvent));
+
+    expect(requestBody(apiRequest, 1).conversationId).not.toBe(requestBody(apiRequest, 0).conversationId);
   });
 
   it("starts a new session but keeps the old one", async () => {

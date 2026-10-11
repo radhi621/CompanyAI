@@ -13,19 +13,9 @@ import { defineTool, objectIdSchema, escapeRegex, assertPatientAccess } from "./
 
 export const patientsTools = {
   create_patient: defineTool({
-    description: "Creates a patient profile in the medical department",
+    description: "Creates a patient profile. Changes data: the user approves it before it runs.",
     allowedRoles: ["admin", "secretary"],
-    destructive: false,
-    argsShape: {
-      firstName: "required string",
-      lastName: "required string",
-      cin: "required string",
-      phone: "optional string",
-      email: "optional email",
-      dateOfBirth: "optional date string",
-      pathologies: "optional array of strings",
-      assignedStaff: "optional array of MongoDB ObjectId",
-    },
+    destructive: true,
     argsSchema: z.object({
       firstName: z.string().min(2),
       lastName: z.string().min(2),
@@ -63,19 +53,9 @@ export const patientsTools = {
   }),
   update_patient: defineTool({
     description:
-      "Updates patient fields such as name, phone, email, date of birth, or pathologies (add with pathologies, remove with removePathologies)",
+      "Updates patient fields such as name, phone, email, date of birth, or pathologies (add with pathologies, remove with removePathologies). Changes data: the user approves it before it runs.",
     allowedRoles: ["admin", "secretary"],
-    destructive: false,
-    argsShape: {
-      patientId: "required MongoDB ObjectId",
-      firstName: "optional string",
-      lastName: "optional string",
-      phone: "optional string",
-      email: "optional email",
-      dateOfBirth: "optional date string YYYY-MM-DD",
-      pathologies: "optional array of strings to add",
-      removePathologies: "optional array of strings to remove",
-    },
+    destructive: true,
     argsSchema: z.object({
       patientId: objectIdSchema,
       firstName: z.string().trim().min(2).max(80).optional(),
@@ -114,12 +94,9 @@ export const patientsTools = {
     },
   }),
   list_patients: defineTool({
-    description: "Lists accessible patients for the requester",
+    description: "Lists the patients the user can access (ID, name, CIN, pathologies).",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: false,
-    argsShape: {
-      limit: "optional number max 100",
-    },
     argsSchema: z.object({
       limit: z.coerce.number().int().positive().max(100).default(50),
     }),
@@ -136,14 +113,9 @@ export const patientsTools = {
     },
   }),
   search_patient: defineTool({
-    description: "Searches patients by name or CIN",
+    description: "Finds patients by name or CIN. Use it to get a patient's ID when the user names a patient.",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: false,
-    argsShape: {
-      name: "optional string",
-      cin: "optional string",
-      limit: "optional number max 50",
-    },
     argsSchema: z
       .object({
         name: z.string().min(2).optional(),
@@ -194,12 +166,9 @@ export const patientsTools = {
     },
   }),
   get_patient_summary: defineTool({
-    description: "Returns a consolidated patient summary",
+    description: "Returns a patient's profile with recent appointments and notes in one call. Use for an overview of a patient.",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: false,
-    argsShape: {
-      patientId: "required MongoDB ObjectId",
-    },
     argsSchema: z.object({
       patientId: objectIdSchema,
     }),
@@ -247,11 +216,6 @@ export const patientsTools = {
     description: "Returns patients with no recent contact in the requested number of days",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: false,
-    argsShape: {
-      days: "required number",
-      pathology: "optional string",
-      limit: "optional number max 100",
-    },
     argsSchema: z.object({
       days: z.coerce.number().int().positive().max(3650),
       pathology: z.string().min(2).max(100).optional(),
@@ -325,13 +289,9 @@ export const patientsTools = {
     },
   }),
   update_patient_notes: defineTool({
-    description: "Adds a new note to a patient record with ownership tracking",
+    description: "Adds a note to a patient's record, written by the current user. Changes data: the user approves it before it runs.",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
-    destructive: false,
-    argsShape: {
-      patientId: "required MongoDB ObjectId",
-      note: "required string",
-    },
+    destructive: true,
     argsSchema: z.object({
       patientId: objectIdSchema,
       note: z.string().min(3).max(4000),
@@ -347,13 +307,9 @@ export const patientsTools = {
     },
   }),
   list_patient_notes: defineTool({
-    description: "Lists patient notes from the database, ordered by most recent",
+    description: "Lists a patient's notes (staff notes in the record), newest first, with each note's ID, author and date. Use for questions about notes.",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: false,
-    argsShape: {
-      patientId: "required MongoDB ObjectId",
-      limit: "optional number max 50",
-    },
     argsSchema: z.object({
       patientId: objectIdSchema,
       limit: z.coerce.number().int().positive().max(50).default(20),
@@ -375,12 +331,9 @@ export const patientsTools = {
     },
   }),
   delete_patient_note: defineTool({
-    description: "Soft-deletes a specific patient note by its ID. Admin can delete any note; other roles can only delete their own notes.",
+    description: "Deletes a patient note by its ID (admins: any note; others: their own notes). Changes data: the user approves it before it runs.",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: true,
-    argsShape: {
-      noteId: "required MongoDB ObjectId",
-    },
     argsSchema: z.object({
       noteId: objectIdSchema,
     }),
