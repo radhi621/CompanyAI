@@ -1,19 +1,21 @@
-// Entry points of the assistant: run a request (plan, execute, write the answer) and confirm or
-// reject a pending destructive action. The steps live in the agent.* modules next to this file.
+// Entry points of the assistant: answer a chat message (agent.chat.ts does the work) and
+// confirm or reject a pending action. Both read and update the stored conversation, so the
+// assistant remembers earlier steps and what happened to the actions it proposed.
 import { Types } from "mongoose";
 import { env } from "../../config/env";
 import { AgentAuditLogModel } from "../../models/AgentAuditLog";
+import { AgentConversationModel, CONVERSATION_TTL_DAYS } from "../../models/AgentConversation";
 import { AgentPendingActionModel, type AgentToolName, type IAgentToolCall } from "../../models/AgentPendingAction";
+import { PatientModel } from "../../models/Patient";
+import type { ChatMessage } from "../../services/llm/chatTypes";
 import type { AuthUser } from "../../types/auth";
 import { ApiError } from "../../utils/apiError";
-import { writeAnswer } from "./agent.answer";
-import { describePendingAction } from "./agent.confirmation";
-import { executeCalls, runAutoRecordSearch } from "./agent.executor";
+import { type ChatPatientContext, answerMessage } from "./agent.chat";
+import { describeOutcome } from "./agent.confirmation";
+import { executeCalls } from "./agent.executor";
 import { listAgentHistory } from "./agent.history";
 import { acquireIdempotency, completeIdempotency, failIdempotency } from "./agent.idempotency";
-import { normalizePlannedToolCalls } from "./agent.patientContext";
-import { type PlannerOutcome, planNextStep, planToolCalls, wantsAnotherTurn } from "./agent.planner";
-import { getToolArgsIssue, isToolDestructive } from "./agent.tools";
+import { assertPatientAccess } from "./tools/shared";
 import {
   type ConfirmPendingActionInput,
   type ExecutePromptInput,
@@ -21,10 +23,14 @@ import {
   extractErrorMessage,
 } from "./agent.types";
 
+/** Stored messages per conversation; the oldest are dropped beyond this. */
+const MAX_STORED_MESSAGES = 300;
+const MAX_AUDIT_TRANSCRIPT_CHARS = 20_000;
+
 interface AuditEntry {
   prompt: string;
   plannerResponse: string;
-  toolResults: Array<{ tool: AgentToolName; args: Record<string, unknown>; result?: unknown }>;
+  toolResults: Array<{ tool: AgentToolName; args: Record<string, unknown>; result?: unknown; error?: string }>;
   pendingActionId?: Types.ObjectId;
   requiresConfirmation: boolean;
   success: boolean;
@@ -39,68 +45,73 @@ async function recordAudit(actor: AuthUser, entry: AuditEntry): Promise<void> {
   });
 }
 
-// Planning turns per request: the first plan plus follow-ups that use earlier results, e.g.
-// find the patient → list her notes → delete the last one.
-const MAX_PLANNING_TURNS = 3;
+const conversationExpiry = () => new Date(Date.now() + CONVERSATION_TTL_DAYS * 24 * 60 * 60 * 1000);
 
-interface UnresolvedAction {
-  tool: AgentToolName;
-  issue: string;
+async function loadConversation(actor: AuthUser, conversationId: string, patientId?: string) {
+  const conversation = await AgentConversationModel.findOneAndUpdate(
+    { actorId: new Types.ObjectId(actor.id), conversationId },
+    {
+      $setOnInsert: {
+        messages: [],
+        ...(patientId ? { patientId: new Types.ObjectId(patientId) } : {}),
+      },
+      $set: { expiresAt: conversationExpiry() },
+    },
+    { upsert: true, returnDocument: "after" },
+  );
+  if (!conversation) {
+    throw new ApiError(500, "Could not open the conversation");
+  }
+  return conversation;
 }
 
-/**
- * Stores destructive calls as a pending action for the user to approve. Every argument must
- * be concrete: a confirmed action runs exactly what the user approved.
- */
-async function requestConfirmation(input: {
-  request: ExecutePromptInput;
-  planner: PlannerOutcome;
-  plannerRaw: string;
-  calls: IAgentToolCall[];
-  results: ExecutedToolResult[];
-}) {
-  const pending = await AgentPendingActionModel.create({
-    actorId: new Types.ObjectId(input.request.actor.id),
-    actorRole: input.request.actor.role,
-    prompt: input.request.prompt,
-    toolCalls: input.calls,
-    status: "pending",
-    expiresAt: new Date(Date.now() + env.AGENT_IDEMPOTENCY_TTL_MINUTES * 60 * 1000),
-  });
+type Conversation = Awaited<ReturnType<typeof loadConversation>>;
 
-  await recordAudit(input.request.actor, {
-    prompt: input.request.prompt,
-    plannerResponse: input.plannerRaw,
-    toolResults: [...input.results, ...input.calls.map((call) => ({ tool: call.tool, args: call.args }))],
-    pendingActionId: pending._id,
-    requiresConfirmation: true,
-    success: true,
-  });
-
-  return {
-    provider: input.planner.provider,
-    requiresConfirmation: true,
-    plannerFallbackUsed: input.planner.fallbackUsed,
-    pendingActionId: pending._id.toString(),
-    expiresAt: pending.expiresAt,
-    plannedToolCalls: input.calls,
-    results: input.results.length > 0 ? input.results : undefined,
-    message: describePendingAction(input.calls, input.results),
-  };
+async function saveMessages(conversation: Conversation, messages: ChatMessage[]): Promise<void> {
+  let kept = messages;
+  if (kept.length > MAX_STORED_MESSAGES) {
+    // Start at a user message, so no tool result is kept without its call.
+    let start = kept.length - MAX_STORED_MESSAGES;
+    while (start < kept.length && kept[start].role !== "user") {
+      start += 1;
+    }
+    kept = kept.slice(start);
+  }
+  conversation.messages = kept;
+  conversation.markModified("messages");
+  await conversation.save();
 }
 
-function unresolved(calls: IAgentToolCall[]): UnresolvedAction[] {
-  return calls.flatMap((call) => {
-    const issue = isToolDestructive(call.tool) ? getToolArgsIssue(call) : null;
-    return issue ? [{ tool: call.tool, issue }] : [];
+/** Adds the outcome of a pending action to the conversation it was asked in. */
+async function appendToConversation(actor: AuthUser, conversationId: string | undefined, text: string) {
+  if (!conversationId) {
+    return;
+  }
+  const conversation = await AgentConversationModel.findOne({
+    actorId: new Types.ObjectId(actor.id),
+    conversationId,
   });
+  if (conversation) {
+    await saveMessages(conversation, [...(conversation.messages ?? []), { role: "assistant", text }]);
+  }
+}
+
+async function patientContext(actor: AuthUser, patientId?: string): Promise<ChatPatientContext | null> {
+  if (!patientId) {
+    return null;
+  }
+  await assertPatientAccess(actor, patientId);
+  const patient = await PatientModel.findById(patientId).select("firstName lastName cin");
+  if (!patient) {
+    throw new ApiError(404, "Patient not found");
+  }
+  return { id: patientId, name: `${patient.firstName} ${patient.lastName}`, cin: patient.cin };
 }
 
 export const agentService = {
   listHistory: listAgentHistory,
 
   async executePrompt(input: ExecutePromptInput): Promise<unknown> {
-    let plannerRaw = "";
     let idempotencyRecordId: Types.ObjectId | undefined;
 
     const idempotency = await acquireIdempotency({
@@ -109,7 +120,8 @@ export const agentService = {
       key: input.idempotencyKey,
       requestPayload: {
         prompt: input.prompt,
-        maxToolCalls: input.maxToolCalls,
+        conversationId: input.conversationId,
+        patientId: input.patientId ?? null,
       },
     });
 
@@ -121,174 +133,58 @@ export const agentService = {
       idempotencyRecordId = idempotency.record._id;
     }
 
-    const finish = async (responsePayload: unknown) => {
-      if (idempotencyRecordId) {
-        await completeIdempotency(idempotencyRecordId, responsePayload);
-      }
-      return responsePayload;
-    };
-
     try {
-      const planner = await planToolCalls(input.actor, input.prompt, input.maxToolCalls, input.history);
-      plannerRaw = planner.raw;
+      const patient = await patientContext(input.actor, input.patientId);
+      const conversation = await loadConversation(input.actor, input.conversationId, input.patientId);
 
-      const calls = normalizePlannedToolCalls(input.prompt, planner.parsed.toolCalls as IAgentToolCall[]);
-      if (calls.length === 0) {
-        const executionResults: ExecutedToolResult[] = [];
-        const autoSearch = await runAutoRecordSearch({
-          actor: input.actor,
+      const messages: ChatMessage[] = [...(conversation.messages ?? [])];
+      const storedBefore = messages.length;
+      const reply = await answerMessage({ actor: input.actor, messages, text: input.prompt, patient });
+
+      let pendingActionId: Types.ObjectId | undefined;
+      let pendingExpiresAt: Date | undefined;
+      if (reply.pending.length > 0) {
+        const pending = await AgentPendingActionModel.create({
+          actorId: new Types.ObjectId(input.actor.id),
+          actorRole: input.actor.role,
           prompt: input.prompt,
-          calls,
-          results: executionResults,
-          reason: "Automatic retrieval because planner returned no explicit tool calls",
+          conversationId: input.conversationId,
+          toolCalls: reply.pending,
+          status: "pending",
+          expiresAt: new Date(Date.now() + env.AGENT_IDEMPOTENCY_TTL_MINUTES * 60 * 1000),
         });
-
-        await recordAudit(input.actor, {
-          prompt: input.prompt,
-          plannerResponse: planner.raw,
-          toolResults: executionResults,
-          requiresConfirmation: false,
-          success: true,
-        });
-
-        const baseFinalMessage =
-          planner.parsed.finalMessage ??
-          "No direct tool execution was planned. Provide patient context for more precise retrieval when needed.";
-
-        const written =
-          executionResults.length > 0
-            ? await writeAnswer(input.actor, input.prompt, executionResults, input.history)
-            : null;
-
-        const finalMessage =
-          written?.text ??
-          (autoSearch.error
-            ? `${baseFinalMessage} Automatic retrieval attempt failed: ${autoSearch.error}.`
-            : baseFinalMessage);
-
-        return finish({
-          provider: planner.provider,
-          writerProvider: written ? written.provider : planner.provider,
-          requiresConfirmation: false,
-          plannerFallbackUsed: planner.fallbackUsed,
-          finalMessage,
-          plannedToolCalls: [],
-          autoChainedToolCalls: autoSearch.autoChainedToolCalls,
-          results: executionResults.length > 0 ? executionResults : undefined,
-        });
+        pendingActionId = pending._id;
+        pendingExpiresAt = pending.expiresAt;
       }
 
-      const readCalls = calls.filter((call) => !isToolDestructive(call.tool));
-      const destructiveCalls = calls.filter((call) => isToolDestructive(call.tool));
-      let unresolvedActions = unresolved(destructiveCalls);
-
-      if (destructiveCalls.length > 0 && (unresolvedActions.length === 0 || readCalls.length === 0)) {
-        // Confirmed actions run with exactly these arguments, so every ID must already be
-        // concrete. Never ask the user to approve an action that depends on values (such
-        // as a patient) that would only be filled in after approval.
-        for (const call of calls) {
-          const issue = getToolArgsIssue(call);
-          if (issue) {
-            throw new ApiError(
-              400,
-              `The planned ${call.tool} action is missing concrete details (${issue}). ` +
-                "Look up the patient, doctor or record first, then ask again with its ID.",
-              { tool: call.tool, args: call.args },
-            );
-          }
-        }
-
-        return finish(
-          await requestConfirmation({ request: input, planner, plannerRaw: planner.raw, calls, results: [] }),
-        );
-      }
-
-      // Destructive calls planned next to lookups but still missing their IDs (for example the
-      // note to delete, before the notes were listed) wait for a later turn with the results.
-      const executionResults = await executeCalls(input.actor, input.prompt, readCalls);
-      const executedCalls = [...readCalls];
-      const plannerRaws = [planner.raw];
-      let continuePlanning = unresolvedActions.length > 0 || wantsAnotherTurn(planner, readCalls);
-
-      for (let turn = 2; continuePlanning && turn <= MAX_PLANNING_TURNS; turn += 1) {
-        const next = await planNextStep({
-          actor: input.actor,
-          prompt: input.prompt,
-          remainingToolCalls: input.maxToolCalls - executedCalls.length,
-          history: input.history,
-          calls: executedCalls,
-          results: executionResults,
-        });
-        if (next.raw) {
-          plannerRaws.push(next.raw);
-        }
-
-        const nextReads = next.calls.filter((call) => !isToolDestructive(call.tool));
-        const nextDestructive = next.calls.filter((call) => isToolDestructive(call.tool));
-        const readyDestructive = nextDestructive.filter((call) => !getToolArgsIssue(call));
-
-        if (nextReads.length > 0) {
-          executionResults.push(...(await executeCalls(input.actor, input.prompt, nextReads)));
-          executedCalls.push(...nextReads);
-        }
-
-        if (readyDestructive.length > 0) {
-          return finish(
-            await requestConfirmation({
-              request: input,
-              planner,
-              plannerRaw: plannerRaws.join("\n\n[next_turn]\n"),
-              calls: readyDestructive,
-              results: executionResults,
-            }),
-          );
-        }
-
-        if (nextDestructive.length > 0) {
-          unresolvedActions = unresolved(nextDestructive);
-        }
-        continuePlanning = next.followUp && nextReads.length > 0;
-      }
-
-      const autoSearch = await runAutoRecordSearch({
-        actor: input.actor,
-        prompt: input.prompt,
-        calls: executedCalls,
-        results: executionResults,
-        reason: "Automatic retrieval added to answer an open-ended question with available patient context",
-      });
+      await saveMessages(conversation, messages);
 
       await recordAudit(input.actor, {
         prompt: input.prompt,
-        plannerResponse: plannerRaws.join("\n\n[next_turn]\n"),
-        toolResults: executionResults,
-        requiresConfirmation: false,
+        plannerResponse: JSON.stringify(messages.slice(storedBefore)).slice(0, MAX_AUDIT_TRANSCRIPT_CHARS),
+        toolResults: [...reply.executed, ...reply.pending.map((call) => ({ tool: call.tool, args: call.args }))],
+        pendingActionId,
+        requiresConfirmation: reply.pending.length > 0,
         success: true,
       });
 
-      const written =
-        executionResults.length > 0
-          ? await writeAnswer(input.actor, input.prompt, executionResults, input.history)
-          : null;
+      const responsePayload = {
+        provider: reply.provider,
+        conversationId: input.conversationId,
+        requiresConfirmation: reply.pending.length > 0,
+        pendingActionId: pendingActionId?.toString(),
+        expiresAt: pendingExpiresAt,
+        plannedToolCalls: reply.pending,
+        results: reply.executed,
+        finalMessage: reply.text,
+        message: reply.text,
+      };
 
-      return finish({
-        provider: planner.provider,
-        writerProvider: written ? written.provider : planner.provider,
-        requiresConfirmation: false,
-        plannerFallbackUsed: planner.fallbackUsed,
-        plannedToolCalls: executedCalls,
-        autoChainedToolCalls: autoSearch.autoChainedToolCalls,
-        autoRecordSearchError: autoSearch.error ?? undefined,
-        results: executionResults,
-        finalMessage: [
-          written?.text ?? planner.parsed.finalMessage ?? "Tools executed successfully, but returned no data.",
-          ...unresolvedActions.map(
-            (action) =>
-              `_I could not prepare the ${action.tool} action: it is missing concrete details (${action.issue}). ` +
-              "Ask again naming the record, or with its ID._",
-          ),
-        ].join("\n\n"),
-      });
+      if (idempotencyRecordId) {
+        await completeIdempotency(idempotencyRecordId, responsePayload);
+      }
+
+      return responsePayload;
     } catch (error) {
       if (idempotencyRecordId) {
         await failIdempotency(idempotencyRecordId, extractErrorMessage(error));
@@ -296,7 +192,7 @@ export const agentService = {
 
       await recordAudit(input.actor, {
         prompt: input.prompt,
-        plannerResponse: plannerRaw || "planning_failed",
+        plannerResponse: "chat_failed",
         toolResults: [],
         requiresConfirmation: false,
         success: false,
@@ -369,43 +265,48 @@ export const agentService = {
         throw new ApiError(409, "Pending action is already being processed");
       }
 
-      if (!input.approved) {
-        await recordAudit(input.actor, {
-          prompt: pending.prompt,
-          plannerResponse: "pending_action_rejected",
-          toolResults: pending.toolCalls.map((call) => ({ tool: call.tool, args: call.args })),
-          pendingActionId: pending._id,
-          requiresConfirmation: true,
-          success: true,
-        });
-
-        return finish({
-          pendingActionId: pending._id.toString(),
-          status: "rejected",
-          message: "Pending action was rejected and not executed.",
-        });
-      }
-
       const plainCalls: IAgentToolCall[] = pending.toolCalls.map((c) => ({
         tool: c.tool,
         args: c.args as Record<string, unknown>,
         reason: c.reason,
       }));
+
+      if (!input.approved) {
+        const message = "Rejected: the action was not run and nothing was changed.";
+        await appendToConversation(input.actor, pending.conversationId, message);
+        await recordAudit(input.actor, {
+          prompt: pending.prompt,
+          plannerResponse: "pending_action_rejected",
+          toolResults: plainCalls.map((call) => ({ tool: call.tool, args: call.args })),
+          pendingActionId: pending._id,
+          requiresConfirmation: true,
+          success: true,
+        });
+
+        return finish({ pendingActionId: pending._id.toString(), status: "rejected", message });
+      }
+
       let executionResults: ExecutedToolResult[];
       try {
-        executionResults = await executeCalls(input.actor, pending.prompt, plainCalls, {
-          resolveMissingPatientIds: false,
-        });
+        executionResults = await executeCalls(input.actor, plainCalls);
       } catch (error) {
         // Some calls may already have run, so never return the action to "pending".
         pending.status = "failed";
         await pending.save();
+        await appendToConversation(
+          input.actor,
+          pending.conversationId,
+          `The approved action failed: ${extractErrorMessage(error)}`,
+        );
         throw error;
       }
 
       pending.status = "executed";
       pending.executedAt = new Date();
       await pending.save();
+
+      const message = describeOutcome(plainCalls, executionResults);
+      await appendToConversation(input.actor, pending.conversationId, message);
 
       await recordAudit(input.actor, {
         prompt: pending.prompt,
@@ -416,15 +317,11 @@ export const agentService = {
         success: true,
       });
 
-      const written =
-        executionResults.length > 0 ? await writeAnswer(input.actor, pending.prompt, executionResults) : null;
-
       return finish({
         pendingActionId: pending._id.toString(),
         status: "executed",
-        writerProvider: written?.provider ?? null,
         results: executionResults,
-        message: written?.text ?? "Pending action confirmed and executed successfully.",
+        message,
       });
     } catch (error) {
       if (idempotencyRecordId) {

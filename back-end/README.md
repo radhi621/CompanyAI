@@ -44,13 +44,13 @@ Production-grade backend foundation for the MediAssist IA project.
     - Same-role users cannot edit each other records
     - Owner can edit own records
     - Higher roles can override lower roles
-- Agent orchestration module with function-style tool execution from natural language
-- Mandatory confirmation for destructive AI actions (cancel appointment)
+- AI assistant (`src/modules/agent`): a conversation loop with native tool calling (Gemini, then Groq)
+  - The model calls the tools its role allows, reads their results and answers; tool errors go back to the model
+  - Each chat session is stored as a conversation (messages, tool calls and results, 30 days), so follow-ups like "done?" work
+  - Tools that change data (create, update, cancel, delete, add a note) wait for the user's approval; the outcome is added to the conversation
 - Agent audit logs and pending-action tracking for traceability
 - Idempotency-Key support on agent execute/confirm endpoints for safe retries
-- LLM retry policy with exponential backoff across providers
-- Strict planner JSON parsing and unsafe-key defenses
-- Planner self-repair attempt and safe no-tool fallback response
+- LLM retry policy across providers (a provider out of daily quota is skipped at once)
 - Assignment enforcement:
   - Non-admin users can access only assigned patients and related AI records
 

@@ -1,5 +1,5 @@
 // The agent's tool registry. Each tool is defined in tools/<domain>.ts; this file assembles them
-// and exposes what the planner and executor need.
+// and exposes what the conversation loop needs.
 import { z } from "zod";
 import { AGENT_TOOL_NAMES, type AgentToolName, type IAgentToolCall } from "../../models/AgentPendingAction";
 import type { UserRole } from "../../types/auth";
@@ -8,7 +8,8 @@ import { appointmentsTools } from "./tools/appointments";
 import { doctorsTools } from "./tools/doctors";
 import { patientsTools } from "./tools/patients";
 import { recordsTools } from "./tools/records";
-import type { AgentToolContext, AgentToolDefinition, ToolCatalogItem } from "./tools/shared";
+import type { ChatTool } from "../../services/llm/chatTypes";
+import type { AgentToolContext, AgentToolDefinition } from "./tools/shared";
 
 const toolRegistry = {
   ...patientsTools,
@@ -19,18 +20,32 @@ const toolRegistry = {
   [K in AgentToolName]: AgentToolDefinition<z.ZodTypeAny>;
 };
 
-export const getToolCatalogForPrompt = (): ToolCatalogItem[] => {
-  return AGENT_TOOL_NAMES.map((toolName) => {
-    const definition = toolRegistry[toolName];
-    return {
-      name: toolName,
-      description: definition.description,
-      allowedRoles: definition.allowedRoles,
-      destructive: definition.destructive,
-      argsShape: definition.argsShape,
-    };
-  });
+const chatToolsByRole = new Map<UserRole, ChatTool[]>();
+
+/** JSON Schema of a tool's arguments, as the model sees them (input side of the Zod schema). */
+function argumentsSchema(schema: z.ZodTypeAny): Record<string, unknown> {
+  const { $schema: _ignored, ...jsonSchema } = z.toJSONSchema(schema, { io: "input", unrepresentable: "any" });
+  return jsonSchema;
+}
+
+/** The tools a role may use, in the shape the AI providers take. */
+export const getChatTools = (role: UserRole): ChatTool[] => {
+  const cached = chatToolsByRole.get(role);
+  if (cached) {
+    return cached;
+  }
+
+  const tools = AGENT_TOOL_NAMES.filter((name) => toolRegistry[name].allowedRoles.includes(role)).map((name) => ({
+    name,
+    description: toolRegistry[name].description,
+    parameters: argumentsSchema(toolRegistry[name].argsSchema),
+  }));
+  chatToolsByRole.set(role, tools);
+  return tools;
 };
+
+export const isAgentToolName = (name: string): name is AgentToolName =>
+  (AGENT_TOOL_NAMES as readonly string[]).includes(name);
 
 export const isToolDestructive = (tool: AgentToolName): boolean => {
   return toolRegistry[tool].destructive;

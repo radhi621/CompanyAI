@@ -1,9 +1,9 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import type { AgentConfirmResult, AgentExecutionResult, ApiRequest, PromptMode } from "../lib/types";
-import { buildPromptWithMode, createId, extractErrorMessage, sanitizeToolCalls, summarizeConfirmResult, summarizeExecutionResult } from "../lib/utils";
-import { buildAgentHistory, ensureConversation } from "../lib/conversations";
+import type { AgentConfirmResult, AgentExecutionResult, ApiRequest } from "../lib/types";
+import { createId, extractErrorMessage, sanitizeToolCalls, summarizeConfirmResult, summarizeExecutionResult } from "../lib/utils";
+import { ensureConversation } from "../lib/conversations";
 import type { Workspace } from "./useWorkspace";
 
 interface UseAgentChatOptions {
@@ -26,8 +26,6 @@ export function useAgentChat({ apiRequest, workspace, setBusy, setFeedback }: Us
     startNewSession,
   } = workspace;
 
-  const [promptMode, setPromptMode] = useState<PromptMode>("fetch");
-  const [maxToolCalls, setMaxToolCalls] = useState(3);
   const [promptInput, setPromptInput] = useState("");
 
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
@@ -53,20 +51,13 @@ export function useAgentChat({ apiRequest, workspace, setBusy, setFeedback }: Us
     setFeedback("Started a new session. Previous sessions are preserved.");
   };
 
-  const handleQuickAction = (action: { mode: PromptMode; prompt: string }) => {
-    setPromptMode(action.mode);
-
-    if (chatScope === "patient") {
-      if (!activeFolder) {
-        setFeedback("Create or select a patient folder first.");
-        return;
-      }
-
-      setPromptInput(action.prompt.replaceAll("<PATIENT_ID>", activeFolder.patientId));
+  const handleQuickAction = (action: { prompt: string }) => {
+    if (chatScope === "patient" && !activeFolder) {
+      setFeedback("Create or select a patient folder first.");
       return;
     }
 
-    setPromptInput(action.prompt.replaceAll("<PATIENT_ID>", "the relevant patient"));
+    setPromptInput(action.prompt.replaceAll("{patient}", chatScope === "patient" ? "this patient" : "patient [name]"));
   };
 
   const executePrompt = async () => {
@@ -84,8 +75,8 @@ export function useAgentChat({ apiRequest, workspace, setBusy, setFeedback }: Us
     setBusy(true);
     setFeedback(null);
 
-    // History is read before the new message is added, so it holds only earlier messages.
-    const history = buildAgentHistory(ensureConversation(conversations, activeConversationKey).messages);
+    // The backend keeps the conversation (with the tools' results) under the session's ID.
+    const conversationId = ensureConversation(conversations, activeConversationKey).id;
 
     appendMessageToConversation(activeConversationKey, {
       role: "user",
@@ -93,19 +84,12 @@ export function useAgentChat({ apiRequest, workspace, setBusy, setFeedback }: Us
     });
 
     try {
-      const payloadPrompt = buildPromptWithMode({
-        mode: promptMode,
-        prompt: trimmed,
-        scope: chatScope,
-        folder: activeFolder ?? undefined,
-      });
-
       const result = await apiRequest<AgentExecutionResult>("/agent/execute", {
         method: "POST",
         body: JSON.stringify({
-          prompt: payloadPrompt,
-          maxToolCalls,
-          history,
+          prompt: trimmed,
+          conversationId,
+          ...(chatScope === "patient" && activeFolder ? { patientId: activeFolder.patientId } : {}),
         }),
         idempotencyKey: createId("agent-execute"),
       });
@@ -184,10 +168,6 @@ export function useAgentChat({ apiRequest, workspace, setBusy, setFeedback }: Us
   };
 
   return {
-    promptMode,
-    setPromptMode,
-    maxToolCalls,
-    setMaxToolCalls,
     promptInput,
     setPromptInput,
     chatContainerRef,

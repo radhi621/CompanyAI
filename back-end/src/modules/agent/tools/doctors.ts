@@ -7,17 +7,9 @@ import { defineTool, objectIdSchema, optionalBooleanSchema } from "./shared";
 
 export const doctorsTools = {
   create_doctor_profile: defineTool({
-    description: "Creates a doctor profile and can link it to an existing doctor user",
+    description: "Creates a doctor profile, optionally linked to an existing doctor user account. Changes data: the user approves it before it runs.",
     allowedRoles: ["admin"],
-    destructive: false,
-    argsShape: {
-      fullName: "required string",
-      specialty: "required string",
-      userId: "optional MongoDB ObjectId",
-      userEmail: "optional email to link doctor account",
-      licenseNumber: "optional string",
-      isActive: "optional boolean",
-    },
+    destructive: true,
     argsSchema: z
       .object({
         fullName: z.string().min(3).max(120),
@@ -69,14 +61,9 @@ export const doctorsTools = {
     },
   }),
   list_doctors: defineTool({
-    description: "Lists doctors in the facility with optional specialty and active filters",
+    description: "Lists the facility's doctors (ID, name, specialty, active), optionally by specialty. Use it to find a doctor's ID.",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: false,
-    argsShape: {
-      specialty: "optional string",
-      isActive: "optional boolean",
-      limit: "optional number max 100",
-    },
     argsSchema: z.object({
       specialty: z.string().min(2).optional(),
       isActive: optionalBooleanSchema,

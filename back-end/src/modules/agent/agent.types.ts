@@ -2,17 +2,14 @@
 import type { AgentToolName } from "../../models/AgentPendingAction";
 import type { AuthUser } from "../../types/auth";
 
-export interface ConversationTurn {
-  role: "user" | "assistant" | "system";
-  text: string;
-}
-
 export interface ExecutePromptInput {
   actor: AuthUser;
   prompt: string;
-  maxToolCalls: number;
+  /** The frontend's chat session: messages with the same ID share one conversation. */
+  conversationId: string;
+  /** The patient the chat is about (patient folders), if any. */
+  patientId?: string;
   idempotencyKey?: string;
-  history?: ConversationTurn[];
 }
 
 export interface ConfirmPendingActionInput {

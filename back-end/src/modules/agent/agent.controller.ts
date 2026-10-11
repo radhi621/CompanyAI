@@ -19,9 +19,9 @@ export const agentController = {
     const output = await agentService.executePrompt({
       actor: req.user,
       prompt: parsed.body.prompt,
-      maxToolCalls: parsed.body.maxToolCalls,
+      conversationId: parsed.body.conversationId,
+      patientId: parsed.body.patientId,
       idempotencyKey,
-      history: parsed.body.history,
     });
 
     res.status(200).json({

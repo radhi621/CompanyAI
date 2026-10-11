@@ -1,5 +1,4 @@
 export type UserRole = "admin" | "doctor" | "nurse" | "secretary";
-export type PromptMode = "fetch" | "insert";
 export type MessageRole = "user" | "assistant" | "system";
 export type ChatScope = "global" | "patient";
 export type RagUploadMode = "global" | "patient";
@@ -39,15 +38,15 @@ export interface AgentToolCall {
 }
 
 export interface AgentExecutionResult {
-  provider?: string;
+  /** Who wrote the answer; null when it was built from the data because no AI provider answered. */
+  provider?: string | null;
+  conversationId?: string;
   requiresConfirmation: boolean;
-  plannerFallbackUsed?: boolean;
   pendingActionId?: string;
   expiresAt?: string;
   finalMessage?: string;
   message?: string;
   plannedToolCalls?: AgentToolCall[];
-  autoChainedToolCalls?: AgentToolCall[];
   results?: unknown;
 }
 

@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { AIRecordModel } from "../src/models/AIRecord";
 import { AGENT_TOOL_NAMES, AgentPendingActionModel } from "../src/models/AgentPendingAction";
 import { AppointmentModel } from "../src/models/Appointment";
-import { executeToolCall, getToolCatalogForPrompt } from "../src/modules/agent/agent.tools";
+import { executeToolCall, getChatTools } from "../src/modules/agent/agent.tools";
 import { appointmentsService } from "../src/modules/appointments/appointments.service";
 import { llmRouter } from "../src/services/llm/llmRouter";
 import { ragService } from "../src/services/rag/ragService";
@@ -18,12 +18,19 @@ let doctorId: string;
 const tomorrowAt = (hour: number) =>
   DateTime.now().setZone("Africa/Casablanca").plus({ days: 1 }).set({ hour, minute: 0, second: 0, millisecond: 0 });
 
-/** Makes the planner return `plan`; any other LLM call (e.g. the summary) returns plain text. */
-function stubPlanner(plan: unknown) {
-  return vi.spyOn(llmRouter, "generate").mockImplementation(async (prompt: string) => ({
-    provider: "gemini",
-    text: prompt.startsWith("You are an orchestration planner") ? JSON.stringify(plan) : "Summary.",
-  }));
+/** Makes the model call `toolCalls` once, then answer. */
+function stubModel(toolCalls: Array<{ name: string; args: Record<string, unknown> }>) {
+  let turn = 0;
+  return vi.spyOn(llmRouter, "chat").mockImplementation(async () => {
+    turn += 1;
+    return {
+      provider: "gemini",
+      turn:
+        turn === 1
+          ? { text: null, toolCalls: toolCalls.map((call, index) => ({ id: `c${index}`, ...call })) }
+          : { text: "Done.", toolCalls: [] },
+    };
+  });
 }
 
 beforeAll(async () => {
@@ -34,9 +41,9 @@ beforeAll(async () => {
 });
 
 describe("tool access", () => {
-  it("does not offer a staff-account tool to the planner", () => {
+  it("does not offer a staff-account tool to the model", () => {
     expect(AGENT_TOOL_NAMES).not.toContain("create_staff_account");
-    expect(getToolCatalogForPrompt().map((tool) => tool.name)).not.toContain("create_staff_account");
+    expect(getChatTools("admin").map((tool) => tool.name)).not.toContain("create_staff_account");
   });
 
   it("limits the global-search fallback to the caller's assigned patients", async () => {
@@ -67,47 +74,18 @@ describe("tool access", () => {
 });
 
 describe("destructive actions", () => {
-  it("never asks to confirm an action whose arguments are not concrete", async () => {
-    stubPlanner({
-      toolCalls: [
-        { tool: "search_patient", args: { name: "Ana" } },
-        {
-          tool: "create_appointment",
-          args: { patientId: "<PATIENT_ID>", doctorId, date: tomorrowAt(10).toISODate(), time: "10:00", motif: "Follow-up visit" },
-        },
-      ],
-    });
-    const before = await AgentPendingActionModel.countDocuments();
-
-    const res = await api().post(`${API}/agent/execute`).set(auth(secretary)).send({ prompt: "Book Ana tomorrow at 10" });
-
-    // The lookup runs; the appointment, whose patient was never found, is reported, not queued.
-    expect(res.status).toBe(200);
-    expect(res.body.data.requiresConfirmation).toBe(false);
-    expect(res.body.data.finalMessage).toMatch(/could not prepare the create_appointment action/i);
-    expect(await AgentPendingActionModel.countDocuments()).toBe(before);
-  });
-
-  it("still refuses a lone action whose arguments are not concrete", async () => {
-    stubPlanner({ toolCalls: [{ tool: "cancel_appointment", args: { appointmentId: "<APPOINTMENT_ID>" } }] });
-
-    const res = await api().post(`${API}/agent/execute`).set(auth(secretary)).send({ prompt: "Cancel that appointment" });
-
-    expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/missing concrete details/i);
-  });
-
   it("asks for confirmation, executes once under concurrent confirms, and keeps existing notes", async () => {
     const patient = await createPatient({ createdBy: admin.id, assignedStaff: [secretary.id] });
     const appointment = await appointmentsService.create({
       actor: secretary.actor, patientId: patient._id.toString(), doctorId,
       startAt: tomorrowAt(10).toJSDate(), reason: "Checkup", notes: "Bring previous results",
     });
-    stubPlanner({
-      toolCalls: [{ tool: "cancel_appointment", args: { appointmentId: appointment._id.toString(), reason: "patient rescheduling" } }],
-    });
+    stubModel([{ name: "cancel_appointment", args: { appointmentId: appointment._id.toString(), reason: "patient rescheduling" } }]);
 
-    const planned = await api().post(`${API}/agent/execute`).set(auth(secretary)).send({ prompt: "Cancel that appointment" });
+    const planned = await api()
+      .post(`${API}/agent/execute`)
+      .set(auth(secretary))
+      .send({ prompt: "Cancel that appointment", conversationId: "cancel-test" });
     expect(planned.status).toBe(200);
     expect(planned.body.data.requiresConfirmation).toBe(true);
 
@@ -122,7 +100,6 @@ describe("destructive actions", () => {
 
   it("runs a confirmed action exactly as approved, never swapping in a patient", async () => {
     await createPatient({ createdBy: admin.id, assignedStaff: [secretary.id], firstName: "Ana" });
-    vi.spyOn(llmRouter, "generate").mockResolvedValue({ provider: "gemini", text: "Summary." });
     const pending = await AgentPendingActionModel.create({
       actorId: new Types.ObjectId(secretary.id), actorRole: "secretary", prompt: "legacy", status: "pending",
       expiresAt: new Date(Date.now() + 3_600_000),

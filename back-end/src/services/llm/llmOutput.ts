@@ -1,18 +1,11 @@
 import { ApiError } from "../../utils/apiError";
+import type { ChatToolCall, ChatTurn } from "./chatTypes";
 
 /** Output token limit for chat answers; thinking tokens of Gemini 2.5 models count toward it. */
-export interface GenerateTextOptions {
-  /**
-   * The prompt asks for a JSON object (the planner). The provider is put in JSON mode, which
-   * also stops gpt-oss on Groq from sometimes ending after its reasoning with empty content.
-   */
-  json?: boolean;
-}
-
-/** Lower than for written answers: a plan should be the same each time for the same request. */
-export const JSON_TEMPERATURE = 0.2;
-
 export const MAX_OUTPUT_TOKENS = 4096;
+
+/** Low, so the same request gets the same tool calls and a similar answer each time. */
+export const CHAT_TEMPERATURE = 0.3;
 
 /** Thinking cap for Gemini 2.5 models, so thinking cannot use up the whole output limit. */
 export const GEMINI_THINKING_BUDGET = 1024;
@@ -45,4 +38,26 @@ export function finalizeLlmText(input: {
   }
 
   return text;
+}
+
+/**
+ * Validates one turn of a tool-calling conversation. A turn must call tools or answer; an
+ * empty turn or one cut off at the token limit is rejected so the router retries.
+ */
+export function finalizeChatTurn(input: {
+  provider: "Gemini" | "Groq";
+  text: string | null | undefined;
+  toolCalls: ChatToolCall[];
+  stoppedAtTokenLimit: boolean;
+}): ChatTurn {
+  if (input.stoppedAtTokenLimit && input.toolCalls.length === 0) {
+    throw new ApiError(502, `${input.provider} answer was cut off at the output token limit`);
+  }
+
+  const text = collapseSpacePadding(input.text ?? "").trim();
+  if (!text && input.toolCalls.length === 0) {
+    throw new ApiError(502, `${input.provider} returned an empty response`);
+  }
+
+  return { text: text || null, toolCalls: input.toolCalls };
 }

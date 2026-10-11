@@ -46,11 +46,11 @@ describe("AI rate limits", () => {
 
   it("limits assistant requests per user, not for everyone", async () => {
     env.AGENT_RATE_LIMIT_PER_MINUTE = 2;
-    vi.spyOn(llmRouter, "generate").mockResolvedValue({ provider: "gemini", text: '{"toolCalls":[],"finalMessage":"Hi."}' });
+    vi.spyOn(llmRouter, "chat").mockResolvedValue({ provider: "gemini", turn: { text: "Hi.", toolCalls: [] } });
     const busy = await createSession("nurse");
     const other = await createSession("nurse");
     const ask = (session: typeof busy) =>
-      api().post(`${API}/agent/execute`).set(auth(session)).send({ prompt: "Hello" });
+      api().post(`${API}/agent/execute`).set(auth(session)).send({ prompt: "Hello", conversationId: `limit-${session.id}` });
 
     expect((await ask(busy)).status).toBe(200);
     expect((await ask(busy)).status).toBe(200);

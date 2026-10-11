@@ -3,7 +3,6 @@ import { DateTime } from "luxon";
 import { Types } from "mongoose";
 import { z } from "zod";
 import { env } from "../../../config/env";
-import type { AgentToolName } from "../../../models/AgentPendingAction";
 import { PatientModel } from "../../../models/Patient";
 import type { AuthUser, UserRole } from "../../../types/auth";
 import { ApiError } from "../../../utils/apiError";
@@ -12,19 +11,10 @@ export interface AgentToolContext {
   actor: AuthUser;
 }
 
-export interface ToolCatalogItem {
-  name: AgentToolName;
-  description: string;
-  allowedRoles: UserRole[];
-  destructive: boolean;
-  argsShape: Record<string, string>;
-}
-
 export interface AgentToolDefinition<TSchema extends z.ZodTypeAny> {
   description: string;
   allowedRoles: UserRole[];
   destructive: boolean;
-  argsShape: Record<string, string>;
   argsSchema: TSchema;
   run: (args: z.infer<TSchema>, context: AgentToolContext) => Promise<unknown>;
 }

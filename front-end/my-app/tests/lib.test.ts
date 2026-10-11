@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { normalizeApiBaseUrl } from "../lib/config";
-import { buildAgentHistory, MAX_HISTORY_TEXT_LENGTH, MAX_HISTORY_TURNS, parseStoredConversations, parseStoredFolders } from "../lib/conversations";
-import { buildPromptWithMode, formatApiErrorMessage, readableAuthError, summarizeExecutionResult } from "../lib/utils";
+import { parseStoredConversations, parseStoredFolders } from "../lib/conversations";
+import { formatApiErrorMessage, readableAuthError, summarizeExecutionResult } from "../lib/utils";
 import { claimWorkspace, releaseWorkspace } from "../lib/workspaceStorage";
 import { CONVERSATIONS_STORAGE_KEY, GLOBAL_CONVERSATION_ID, WORKSPACE_OWNER_STORAGE_KEY } from "../lib/config";
-import type { ChatMessage } from "../lib/types";
 
 describe("normalizeApiBaseUrl", () => {
   it("falls back to the default when unset", () => {
@@ -46,27 +45,14 @@ describe("summarizeExecutionResult", () => {
     );
   });
 
-  it("names the planned tools when confirmation is needed", () => {
+  it("shows the confirmation message, which names the action, when approval is needed", () => {
     const text = summarizeExecutionResult({
       requiresConfirmation: true,
       pendingActionId: "a1",
-      message: "Confirm deletion.",
+      message: "Please confirm before anything is changed:\n- **Delete note**: noteId `n1`",
       plannedToolCalls: [{ tool: "delete_patient_note", args: {} }],
     });
-    expect(text).toBe("Confirm deletion. Planned tools: delete_patient_note.");
-  });
-});
-
-describe("buildPromptWithMode", () => {
-  it("includes the active patient in patient scope", () => {
-    const prompt = buildPromptWithMode({
-      mode: "fetch",
-      prompt: "Summarize",
-      scope: "patient",
-      folder: { id: "f1", name: "Amrani", patientId: "a".repeat(24), createdAt: 0 },
-    });
-    expect(prompt).toContain(`Active patientId: ${"a".repeat(24)}`);
-    expect(prompt.endsWith("Summarize")).toBe(true);
+    expect(text).toBe("Please confirm before anything is changed:\n- **Delete note**: noteId `n1`");
   });
 });
 
@@ -94,33 +80,6 @@ describe("stored workspace parsing", () => {
     );
     const conversation = parsed[GLOBAL_CONVERSATION_ID];
     expect(conversation.sessions[conversation.activeSessionId].messages.map((m) => m.text)).toEqual(["hello"]);
-  });
-});
-
-describe("buildAgentHistory", () => {
-  const message = (index: number, text = `message ${index}`): ChatMessage => ({
-    id: `m${index}`,
-    role: index % 2 === 0 ? "user" : "assistant",
-    text,
-    createdAt: index,
-  });
-
-  it("keeps every earlier message, including the last AI answer", () => {
-    const history = buildAgentHistory([message(0), message(1)]);
-    expect(history).toEqual([
-      { role: "user", text: "message 0" },
-      { role: "assistant", text: "message 1" },
-    ]);
-  });
-
-  it("stays within the backend's limits", () => {
-    const messages = Array.from({ length: MAX_HISTORY_TURNS + 20 }, (_, index) => message(index));
-    messages[messages.length - 1] = message(999, "x".repeat(MAX_HISTORY_TEXT_LENGTH + 500));
-
-    const history = buildAgentHistory(messages);
-    expect(history).toHaveLength(MAX_HISTORY_TURNS);
-    expect(history[0].text).toBe("message 20");
-    expect(history[history.length - 1].text).toHaveLength(MAX_HISTORY_TEXT_LENGTH);
   });
 });
 

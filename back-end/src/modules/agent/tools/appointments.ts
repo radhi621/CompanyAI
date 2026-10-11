@@ -11,15 +11,9 @@ import { defineTool, objectIdSchema, localDateSchema, localTimeSchema, parseLoca
 
 export const appointmentsTools = {
   list_appointments: defineTool({
-    description: "Lists appointments by optional patient/doctor/date filters",
+    description: "Lists appointments, filtered by patient, doctor and/or date range. Use for a patient's appointments or a period's bookings.",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: false,
-    argsShape: {
-      patientId: "optional MongoDB ObjectId",
-      doctorId: "optional MongoDB ObjectId",
-      date: "optional YYYY-MM-DD",
-      limit: "optional number max 100",
-    },
     argsSchema: z.object({
       patientId: objectIdSchema.optional(),
       doctorId: objectIdSchema.optional(),
@@ -47,15 +41,9 @@ export const appointmentsTools = {
     },
   }),
   check_availability: defineTool({
-    description: "Checks whether a doctor is available at a given local date/time",
+    description: "Checks whether a doctor is free at a local date and time (clinic time zone), before booking.",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: false,
-    argsShape: {
-      doctorId: "required MongoDB ObjectId",
-      date: "required YYYY-MM-DD",
-      time: "required HH:mm",
-      estimatedDurationMinutes: "optional number",
-    },
     argsSchema: z.object({
       doctorId: objectIdSchema,
       date: localDateSchema,
@@ -94,17 +82,9 @@ export const appointmentsTools = {
     },
   }),
   create_appointment: defineTool({
-    description: "Creates an appointment from local date/time and reason",
+    description: "Books an appointment for a patient with a doctor at a local date and time. Changes data: the user approves it before it runs.",
     allowedRoles: ["admin", "doctor", "secretary"],
     destructive: true,
-    argsShape: {
-      patientId: "required MongoDB ObjectId",
-      doctorId: "required MongoDB ObjectId",
-      date: "required YYYY-MM-DD",
-      time: "required HH:mm",
-      motif: "required string",
-      estimatedDurationMinutes: "optional number",
-    },
     argsSchema: z.object({
       patientId: objectIdSchema,
       doctorId: objectIdSchema,
@@ -135,13 +115,9 @@ export const appointmentsTools = {
     },
   }),
   cancel_appointment: defineTool({
-    description: "Cancels an appointment by setting status to cancelled",
+    description: "Cancels an appointment. Changes data: the user approves it before it runs.",
     allowedRoles: ["admin", "doctor", "secretary"],
     destructive: true,
-    argsShape: {
-      appointmentId: "required MongoDB ObjectId",
-      reason: "optional string",
-    },
     argsSchema: z.object({
       appointmentId: objectIdSchema,
       reason: z.string().max(600).optional(),
@@ -168,13 +144,9 @@ export const appointmentsTools = {
     },
   }),
   get_day_schedule: defineTool({
-    description: "Returns the schedule for a day, optionally filtered by doctor",
+    description: "Returns one day's appointments (clinic time zone), optionally for one doctor. Use for \"today's schedule\" questions.",
     allowedRoles: ["admin", "doctor", "nurse", "secretary"],
     destructive: false,
-    argsShape: {
-      date: "required YYYY-MM-DD",
-      doctorId: "optional MongoDB ObjectId",
-    },
     argsSchema: z.object({
       date: localDateSchema,
       doctorId: objectIdSchema.optional(),

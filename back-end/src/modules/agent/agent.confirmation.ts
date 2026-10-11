@@ -3,7 +3,7 @@
 // record each action targets before approving, not only the tool name.
 import { DateTime } from "luxon";
 import { env } from "../../config/env";
-import type { IAgentToolCall } from "../../models/AgentPendingAction";
+import type { AgentToolName, IAgentToolCall } from "../../models/AgentPendingAction";
 import type { ExecutedToolResult } from "./agent.types";
 
 const OBJECT_ID = /^[a-fA-F0-9]{24}$/;
@@ -87,12 +87,27 @@ function describeCall(call: IAgentToolCall, rowsById: Map<string, Row>): string 
     return description ? `${key} \`${text}\` (${description})` : `${key} ${short(text)}`;
   });
 
-  return `- **${call.tool}**${details.length > 0 ? `: ${details.join("; ")}` : ""}`;
+  return `- **${ACTION_LABELS[call.tool] ?? call.tool}**${details.length > 0 ? `: ${details.join("; ")}` : ""}`;
 }
 
-export function describePendingAction(calls: IAgentToolCall[], results: ExecutedToolResult[]): string {
+const ACTION_LABELS: Partial<Record<AgentToolName, string>> = {
+  create_patient: "Create patient",
+  update_patient: "Update patient",
+  update_patient_notes: "Add note",
+  delete_patient_note: "Delete note",
+  create_appointment: "Book appointment",
+  cancel_appointment: "Cancel appointment",
+  create_doctor_profile: "Create doctor profile",
+};
+
+/**
+ * @param knownResults tool results from the conversation so far, used to describe the records
+ *   the actions target (the note to delete may have been listed several messages earlier).
+ */
+export function describePendingAction(calls: IAgentToolCall[], knownResults: unknown[]): string {
   const rowsById = new Map<string, Row>();
-  for (const row of collectRows(results.map((entry) => entry.result))) {
+  // Most recent results first, so the latest version of a record describes it.
+  for (const row of collectRows([...knownResults].reverse())) {
     const id = rowId(row);
     if (id && !rowsById.has(id)) {
       rowsById.set(id, row);
@@ -104,4 +119,16 @@ export function describePendingAction(calls: IAgentToolCall[], results: Executed
     ...calls.map((call) => describeCall(call, rowsById)),
     "Approve to run it, or reject to cancel.",
   ].join("\n");
+}
+
+/** The message after an approved action ran: what was done, with the IDs of created records. */
+export function describeOutcome(calls: IAgentToolCall[], results: ExecutedToolResult[]): string {
+  const lines = calls.map((call, index) => {
+    const row = collectRows(JSON.parse(JSON.stringify(results[index]?.result ?? null)))[0];
+    const id = row ? rowId(row) : null;
+    const created = id && !Object.values(call.args ?? {}).includes(id) ? ` → \`${id}\`` : "";
+    return `${describeCall(call, new Map())}${created}`;
+  });
+
+  return ["Done. The approved action ran:", ...lines].join("\n");
 }
