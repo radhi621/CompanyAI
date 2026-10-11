@@ -95,6 +95,7 @@ export const aiController = {
       patientId: parsed.query.patientId,
       mode: parsed.query.mode,
       includeDeleted: parsed.query.includeDeleted,
+      hasFiles: parsed.query.hasFiles,
       limit: parsed.query.limit,
     });
 
@@ -153,6 +154,28 @@ export const aiController = {
     await aiService.deleteRecord(req.aiRecord, req.user);
     res.status(200).json({
       message: "AI record deleted successfully",
+    });
+  }),
+
+  replaceRecordFiles: asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new ApiError(401, "Authentication is required");
+    }
+
+    if (!req.aiRecord) {
+      throw new ApiError(404, "AI record not found");
+    }
+
+    const files = (req.files ?? []) as Express.Multer.File[];
+    if (files.length === 0) {
+      throw new ApiError(400, "At least one file is required");
+    }
+
+    const replacement = await aiService.replaceRecordFiles({ actor: req.user, record: req.aiRecord, files });
+
+    res.status(201).json({
+      message: "Uploaded files replaced successfully",
+      data: replacement,
     });
   }),
 

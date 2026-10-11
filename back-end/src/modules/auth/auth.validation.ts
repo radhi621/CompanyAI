@@ -20,6 +20,13 @@ export const createUserSchema = z.object({
   }),
 });
 
+export const changePasswordSchema = z.object({
+  body: z.object({
+    currentPassword: z.string().min(1),
+    newPassword: z.string().min(8).max(128),
+  }),
+});
+
 export const loginSchema = z.object({
   body: z.object({
     email: z.string().email(),

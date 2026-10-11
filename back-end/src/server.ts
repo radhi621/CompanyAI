@@ -2,7 +2,12 @@ import { app } from "./app";
 import { connectDatabase, disconnectDatabase } from "./config/database";
 import { env } from "./config/env";
 import { setServers } from "node:dns/promises";
-setServers(["1.1.1.1", "8.8.8.8"]); 
+
+// Optional DNS override (e.g. when the local resolver cannot answer MongoDB Atlas SRV lookups).
+if (env.DNS_SERVERS.length > 0) {
+  setServers(env.DNS_SERVERS);
+}
+
 async function startServer(): Promise<void> {
   await connectDatabase();
 

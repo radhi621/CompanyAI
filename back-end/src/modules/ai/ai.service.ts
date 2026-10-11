@@ -43,7 +43,14 @@ interface ListAIRecordsInput {
   patientId?: string;
   mode?: AIRecordMode;
   includeDeleted?: boolean;
+  hasFiles?: boolean;
   limit: number;
+}
+
+interface ReplaceRecordFilesInput {
+  actor: AuthUser;
+  record: IAIRecordDocument;
+  files: Express.Multer.File[];
 }
 
 interface UpdateAIRecordInput {
@@ -270,6 +277,10 @@ export const aiService = {
       query.mode = input.mode;
     }
 
+    if (input.hasFiles) {
+      query["sourceFiles.0"] = { $exists: true };
+    }
+
     if (input.includeDeleted) {
       if (input.actor.role !== "admin") {
         throw new ApiError(403, "Only admin can include deleted records");
@@ -296,10 +307,33 @@ export const aiService = {
       };
     }
 
-    return AIRecordModel.find(query)
+    const records = AIRecordModel.find(query)
       .sort({ createdAt: -1 })
       .limit(input.limit)
       .populate("createdBy", "name email role");
+
+    // The file list only needs file details, not the stored text excerpts.
+    return input.hasFiles ? records.select("-contextChunks") : records;
+  },
+
+  /**
+   * Replaces an upload with new files: the new upload is indexed first and the old one is
+   * deleted only after that succeeds, so a failed replacement keeps the original.
+   */
+  async replaceRecordFiles(input: ReplaceRecordFilesInput): Promise<IAIRecordDocument> {
+    const { record, actor } = input;
+
+    const replacement = await aiService.generateRecordFromFiles({
+      actor,
+      patientId: record.patientId.toString(),
+      title: record.title,
+      prompt: record.prompt,
+      mode: record.mode,
+      files: input.files,
+    });
+
+    await aiService.deleteRecord(record, actor);
+    return replacement;
   },
 
   async getRecordById(recordId: string, actor: AuthUser): Promise<IAIRecordDocument> {

@@ -3,6 +3,7 @@ import { authenticate } from "../../middlewares/authenticate";
 import { authorize } from "../../middlewares/authorize";
 import { ensureAssignedPatientAccessByBody } from "../../middlewares/patientAccess";
 import { ensureAIRecordOwnerOrHigher } from "../../middlewares/ownership";
+import { aiRecordRateLimit } from "../../middlewares/rateLimit";
 import { aiRecordUpload } from "../../middlewares/upload";
 import { aiController } from "./ai.controller";
 
@@ -13,13 +14,15 @@ aiRoutes.use(authenticate, authorize("admin", "doctor", "nurse", "secretary"));
 aiRoutes.post(
 	"/global/upload",
 	authorize("admin"),
+	aiRecordRateLimit,
 	aiRecordUpload.array("files", 8),
 	aiController.uploadGlobalKnowledgeFiles,
 );
 
-aiRoutes.post("/records/generate", ensureAssignedPatientAccessByBody("patientId"), aiController.generateRecord);
+aiRoutes.post("/records/generate", aiRecordRateLimit, ensureAssignedPatientAccessByBody("patientId"), aiController.generateRecord);
 aiRoutes.post(
 	"/records/upload",
+	aiRecordRateLimit,
 	aiRecordUpload.array("files", 8),
 	ensureAssignedPatientAccessByBody("patientId"),
 	aiController.uploadRecordFiles,
@@ -28,4 +31,12 @@ aiRoutes.get("/records", aiController.listRecords);
 aiRoutes.get("/records/:recordId", aiController.getRecordById);
 aiRoutes.patch("/records/:recordId", ensureAIRecordOwnerOrHigher, aiController.updateRecord);
 aiRoutes.delete("/records/:recordId", ensureAIRecordOwnerOrHigher, aiController.deleteRecord);
+// Permission is checked before the files are read.
+aiRoutes.post(
+	"/records/:recordId/replace",
+	ensureAIRecordOwnerOrHigher,
+	aiRecordRateLimit,
+	aiRecordUpload.array("files", 8),
+	aiController.replaceRecordFiles,
+);
 aiRoutes.post("/records/:recordId/restore", authorize("admin"), aiController.restoreRecord);

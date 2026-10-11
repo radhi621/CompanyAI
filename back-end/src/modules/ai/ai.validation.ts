@@ -45,6 +45,11 @@ export const listAIRecordSchema = z.object({
       .enum(["true", "false"])
       .transform((value) => value === "true")
       .optional(),
+    // Only records created from uploaded files (the RAG upload list).
+    hasFiles: z
+      .enum(["true", "false"])
+      .transform((value) => value === "true")
+      .optional(),
     limit: z.coerce.number().int().positive().max(100).default(20),
   }),
 });

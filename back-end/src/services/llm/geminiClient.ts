@@ -1,6 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { env } from "../../config/env";
 import { ApiError } from "../../utils/apiError";
+import { GEMINI_THINKING_BUDGET, MAX_OUTPUT_TOKENS, finalizeLlmText } from "./llmOutput";
 
 const gemini = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
 
@@ -26,8 +27,12 @@ export const geminiClient = {
         model: env.GEMINI_MODEL,
         contents: prompt,
         config: {
-          maxOutputTokens: 2048,
+          maxOutputTokens: MAX_OUTPUT_TOKENS,
           temperature: 0.7,
+          // Only 2.5 models take a thinking budget; older models reject the setting.
+          ...(/gemini-2\.5/.test(env.GEMINI_MODEL)
+            ? { thinkingConfig: { thinkingBudget: GEMINI_THINKING_BUDGET } }
+            : {}),
         },
       });
     } catch (error) {
@@ -36,12 +41,11 @@ export const geminiClient = {
       });
     }
 
-    const text = response.text?.trim();
-    if (!text) {
-      throw new ApiError(502, "Gemini returned an empty response");
-    }
-
-    return text;
+    return finalizeLlmText({
+      provider: "Gemini",
+      text: response.text,
+      stoppedAtTokenLimit: response.candidates?.[0]?.finishReason === "MAX_TOKENS",
+    });
   },
 
   async embedText(text: string): Promise<number[]> {

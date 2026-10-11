@@ -6,6 +6,7 @@ import morgan from "morgan";
 import swaggerUi from "swagger-ui-express";
 import { corsOrigins, env } from "./config/env";
 import { openApiDocument } from "./docs/openapi";
+import { healthHandler } from "./health";
 import { errorHandler, notFoundHandler } from "./middlewares/errorHandler";
 import { apiRouter } from "./routes";
 
@@ -20,15 +21,11 @@ app.use(
 );
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
-app.use(morgan(env.NODE_ENV === "production" ? "combined" : "dev"));
+if (env.NODE_ENV !== "test") {
+  app.use(morgan(env.NODE_ENV === "production" ? "combined" : "dev"));
+}
 
-app.get("/health", (_req: Request, res: Response) => {
-  res.status(200).json({
-    status: "ok",
-    service: "mediassist-backend",
-    timestamp: new Date().toISOString(),
-  });
-});
+app.get("/health", healthHandler);
 
 app.get("/openapi.json", (_req: Request, res: Response) => {
   res.status(200).json(openApiDocument);

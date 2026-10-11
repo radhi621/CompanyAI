@@ -7,6 +7,7 @@ import {
   type IAppointmentDocument,
 } from "../../models/Appointment";
 import { DoctorModel } from "../../models/Doctor";
+import { assertWithinDoctorSchedule } from "../doctors/doctors.service";
 import { PatientModel } from "../../models/Patient";
 import type { AuthUser } from "../../types/auth";
 import { ApiError } from "../../utils/apiError";
@@ -26,6 +27,7 @@ interface CreateAppointmentInput {
   status?: AppointmentStatus;
   source?: "manual" | "ai";
   notes?: string;
+  allowOutsideSchedule?: boolean;
 }
 
 interface ListAppointmentsInput {
@@ -48,6 +50,7 @@ interface UpdateAppointmentInput {
   reason?: string;
   status?: AppointmentStatus;
   notes?: string;
+  allowOutsideSchedule?: boolean;
 }
 
 interface ResolveTimeRangeInput {
@@ -144,28 +147,55 @@ function resolveTimeRange(input: ResolveTimeRangeInput): {
   };
 }
 
-async function assertNoConflict(
-  doctorId: string,
-  startAt: Date,
-  endAt: Date,
-  excludeAppointmentId?: string,
-): Promise<void> {
-  const conflict = await AppointmentModel.findOne({
-    doctorId: new Types.ObjectId(doctorId),
+// Neither the doctor nor the patient can be in two active appointments at once.
+async function assertNoConflict(input: {
+  doctorId: string;
+  patientId: string;
+  startAt: Date;
+  endAt: Date;
+  excludeAppointmentId?: string;
+}): Promise<void> {
+  const overlapping = {
     deletedAt: { $exists: false },
-    status: { $nin: ["cancelled"] },
-    ...(excludeAppointmentId
+    status: { $nin: ["cancelled"] as AppointmentStatus[] },
+    ...(input.excludeAppointmentId
       ? {
-          _id: { $ne: new Types.ObjectId(excludeAppointmentId) },
+          _id: { $ne: new Types.ObjectId(input.excludeAppointmentId) },
         }
       : {}),
-    startAt: { $lt: endAt },
-    endAt: { $gt: startAt },
-  }).select("_id startAt endAt");
+    startAt: { $lt: input.endAt },
+    endAt: { $gt: input.startAt },
+  };
 
-  if (conflict) {
+  if (await AppointmentModel.exists({ ...overlapping, doctorId: new Types.ObjectId(input.doctorId) })) {
     throw new ApiError(409, "This doctor already has an overlapping appointment in that time range");
   }
+
+  if (await AppointmentModel.exists({ ...overlapping, patientId: new Types.ObjectId(input.patientId) })) {
+    throw new ApiError(409, "This patient already has an overlapping appointment in that time range");
+  }
+}
+
+// Small allowance so a booking made "now" is not rejected by clock drift or form latency.
+const PAST_BOOKING_GRACE_MS = 5 * 60 * 1000;
+
+function assertNotInPast(startAt: Date): void {
+  if (startAt.getTime() < Date.now() - PAST_BOOKING_GRACE_MS) {
+    throw new ApiError(400, "Appointments cannot be scheduled in the past");
+  }
+}
+
+// Admins may book outside a doctor's working hours (e.g. emergencies); nobody else can.
+function shouldBypassSchedule(actor: AuthUser, allowOutsideSchedule?: boolean): boolean {
+  if (!allowOutsideSchedule) {
+    return false;
+  }
+
+  if (actor.role !== "admin") {
+    throw new ApiError(403, "Only admins can book outside a doctor's working hours");
+  }
+
+  return true;
 }
 
 async function getAppointmentOrThrow(appointmentId: string): Promise<IAppointmentDocument> {
@@ -188,7 +218,16 @@ export const appointmentsService = {
       estimatedDurationMinutes: input.estimatedDurationMinutes,
     });
 
-    await assertNoConflict(input.doctorId, timing.startAt, timing.endAt);
+    assertNotInPast(timing.startAt);
+    if (!shouldBypassSchedule(input.actor, input.allowOutsideSchedule)) {
+      await assertWithinDoctorSchedule(input.doctorId, timing.startAt, timing.endAt);
+    }
+    await assertNoConflict({
+      doctorId: input.doctorId,
+      patientId: input.patientId,
+      startAt: timing.startAt,
+      endAt: timing.endAt,
+    });
 
     return AppointmentModel.create({
       patientId: new Types.ObjectId(input.patientId),
@@ -281,27 +320,43 @@ export const appointmentsService = {
       throw new ApiError(403, "Only owner or higher role can modify this appointment");
     }
 
-    const nextStartAt = input.startAt ?? appointment.startAt;
-    const nextEndAt = input.endAt;
-    const nextEstimated = input.estimatedDurationMinutes ?? appointment.estimatedDurationMinutes;
+    const timingChanged =
+      input.startAt !== undefined ||
+      input.endAt !== undefined ||
+      input.estimatedDurationMinutes !== undefined;
+    const nextStatus = input.status ?? appointment.status;
+    const reactivating = appointment.status === "cancelled" && nextStatus !== "cancelled";
 
-    const timing = resolveTimeRange({
-      actorRole: input.actor.role,
-      startAt: nextStartAt,
-      endAt: nextEndAt,
-      estimatedDurationMinutes: nextEstimated,
-    });
+    // Status, reason or notes changes (e.g. cancelling, or marking a past visit completed)
+    // must not be blocked by time checks; only re-validate when the slot itself changes
+    // or a cancelled appointment is reinstated.
+    if (timingChanged) {
+      const timing = resolveTimeRange({
+        actorRole: input.actor.role,
+        startAt: input.startAt ?? appointment.startAt,
+        endAt: input.endAt,
+        estimatedDurationMinutes: input.estimatedDurationMinutes ?? appointment.estimatedDurationMinutes,
+      });
 
-    await assertNoConflict(
-      appointment.doctorId.toString(),
-      timing.startAt,
-      timing.endAt,
-      appointment._id.toString(),
-    );
+      assertNotInPast(timing.startAt);
+      if (!shouldBypassSchedule(input.actor, input.allowOutsideSchedule)) {
+        await assertWithinDoctorSchedule(appointment.doctorId.toString(), timing.startAt, timing.endAt);
+      }
 
-    appointment.startAt = timing.startAt;
-    appointment.endAt = timing.endAt;
-    appointment.estimatedDurationMinutes = timing.estimatedDurationMinutes;
+      appointment.startAt = timing.startAt;
+      appointment.endAt = timing.endAt;
+      appointment.estimatedDurationMinutes = timing.estimatedDurationMinutes;
+    }
+
+    if (nextStatus !== "cancelled" && (timingChanged || reactivating)) {
+      await assertNoConflict({
+        doctorId: appointment.doctorId.toString(),
+        patientId: appointment.patientId.toString(),
+        startAt: appointment.startAt,
+        endAt: appointment.endAt,
+        excludeAppointmentId: appointment._id.toString(),
+      });
+    }
 
     if (input.reason !== undefined) {
       appointment.reason = input.reason;
@@ -344,12 +399,15 @@ export const appointmentsService = {
       throw new ApiError(404, "Deleted appointment not found");
     }
 
-    await assertNoConflict(
-      appointment.doctorId.toString(),
-      appointment.startAt,
-      appointment.endAt,
-      appointment._id.toString(),
-    );
+    if (appointment.status !== "cancelled") {
+      await assertNoConflict({
+        doctorId: appointment.doctorId.toString(),
+        patientId: appointment.patientId.toString(),
+        startAt: appointment.startAt,
+        endAt: appointment.endAt,
+        excludeAppointmentId: appointment._id.toString(),
+      });
+    }
 
     appointment.deletedAt = undefined;
     appointment.deletedBy = undefined;

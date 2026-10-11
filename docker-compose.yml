@@ -1,0 +1,75 @@
+name: companyai
+
+services:
+  mongo:
+    image: mongo:8.0
+    container_name: companyai-mongo
+    restart: unless-stopped
+    ports:
+      # Host port is configurable via MONGO_PORT in a root .env file (defaults to 27017).
+      - "127.0.0.1:${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  qdrant:
+    # Vector database for RAG search. Matches the @qdrant/js-client-rest version in back-end.
+    image: qdrant/qdrant:v1.17.0
+    container_name: companyai-qdrant
+    restart: unless-stopped
+    ports:
+      # Host port is configurable via QDRANT_PORT in a root .env file (defaults to 6333).
+      # Bound to 127.0.0.1 only: the instance has no API key, so it must not be reachable from the network.
+      - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  # The app itself, for running it without Node installed: docker compose --profile app up -d --build
+  # Without --profile app, only the databases start (the usual setup for npm run dev).
+  backend:
+    profiles: ["app"]
+    build: ./back-end
+    container_name: companyai-backend
+    restart: unless-stopped
+    # API keys and secrets come from back-end/.env; the addresses below replace its local ones.
+    env_file: ./back-end/.env
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      MONGODB_URI: mongodb://mongo:27017/${MONGO_DB:-medical}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ""
+      DNS_SERVERS: ""
+      CORS_ORIGIN: http://localhost:${FRONTEND_PORT:-3000}
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-4000}:4000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  frontend:
+    profiles: ["app"]
+    build:
+      context: ./front-end/my-app
+      args:
+        # The browser calls the API directly, so this is the host address, not the container name.
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:${BACKEND_PORT:-4000}/api/v1
+    container_name: companyai-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - backend
+
+volumes:
+  mongo-data:
+    name: companyai-mongo-data
+  qdrant-data:
+    name: companyai-qdrant-data
