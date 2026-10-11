@@ -100,6 +100,25 @@ npm run dev
 
 Open the frontend at `http://localhost:3000` and the backend API at `http://localhost:4000/api/v1`.
 
+### Run everything in Docker (no Node.js needed)
+
+The backend and frontend also have production images. They are in the `app` profile, so the
+plain `docker compose up -d` above still starts only the databases.
+
+```bash
+docker compose --profile app up -d --build   # build and start MongoDB, Qdrant, backend and frontend
+docker compose --profile app down            # stop and remove them (data is kept)
+```
+
+- The backend reads its keys and secrets from `back-end/.env`. Compose replaces the database
+  addresses with the container ones (`mongo`, `qdrant`) and uses the `medical` database
+  (`MONGO_DB` in the root `.env` changes it).
+- The ports are 3000 and 4000, the same as `npm run dev`: stop the dev servers first, or set
+  `FRONTEND_PORT` and `BACKEND_PORT` in the root `.env`. The frontend image is built for the
+  backend port, so rebuild (`--build`) after changing it.
+- The backend runs with `NODE_ENV=production`, so the refresh cookie is `Secure`. Browsers
+  accept that on `http://localhost`; any other host needs HTTPS.
+
 ## Backend Scripts
 
 - `npm run dev` - start the API in watch mode
