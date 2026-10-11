@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 import type { AgentConfirmResult, AgentExecutionResult, ApiRequest } from "../lib/types";
-import { createId, extractErrorMessage, sanitizeToolCalls, summarizeConfirmResult, summarizeExecutionResult } from "../lib/utils";
+import { createId, extractErrorMessage, httpStatusOf, readableApiError, sanitizeToolCalls, summarizeConfirmResult, summarizeExecutionResult } from "../lib/utils";
 import { ensureConversation } from "../lib/conversations";
 import type { Workspace } from "./useWorkspace";
 
@@ -158,10 +158,20 @@ export function useAgentChat({ apiRequest, workspace, setBusy, setFeedback }: Us
 
       setPendingActionForConversation(activeConversationKey, null);
     } catch (error) {
+      // Any answer from the server settles the action (it failed, was already handled, expired
+      // or is not this user's), so the Approve/Reject box goes away. Only a network failure or
+      // a rate limit leaves it open to try again.
+      const status = httpStatusOf(error);
+      const settled = status !== null && status !== 429;
       appendMessageToConversation(activeConversationKey, {
         role: "system",
-        text: extractErrorMessage(error),
+        text: settled
+          ? `The action was not completed: ${readableApiError(error)}`
+          : extractErrorMessage(error),
       });
+      if (settled) {
+        setPendingActionForConversation(activeConversationKey, null);
+      }
     } finally {
       setBusy(false);
     }
