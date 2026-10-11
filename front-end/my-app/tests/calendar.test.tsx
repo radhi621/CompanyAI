@@ -160,4 +160,14 @@ describe("Calendar", () => {
     expect(mutations(fetchMock)[0][0]).toBe(`${API}/appointments/a1`);
     expect(mutations(fetchMock)[0][1]?.method).toBe("DELETE");
   });
+
+  it("reloads the month when data changed elsewhere", async () => {
+    const fetchMock = stubFetch();
+    const { rerender } = render(<Calendar token="access-1" refreshKey={0} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    rerender(<Calendar token="access-1" refreshKey={1} />);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
 });

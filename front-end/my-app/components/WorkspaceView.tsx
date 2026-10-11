@@ -1,6 +1,6 @@
 "use client";
 
-import type { Dispatch, SetStateAction } from "react";
+import { type Dispatch, type SetStateAction, useState } from "react";
 import Calendar from "./Calendar";
 import AccountPanel from "./AccountPanel";
 import ChatPanel from "./ChatPanel";
@@ -40,7 +40,15 @@ export default function WorkspaceView({
   setFeedback,
 }: WorkspaceViewProps) {
   const workspace = useWorkspace(setFeedback);
-  const chat = useAgentChat({ apiRequest, workspace, setBusy, setFeedback });
+  // Bumped when the chat changes data, so the calendar and patient panel reload.
+  const [dataVersion, setDataVersion] = useState(0);
+  const chat = useAgentChat({
+    apiRequest,
+    workspace,
+    setBusy,
+    setFeedback,
+    onDataChanged: () => setDataVersion((version) => version + 1),
+  });
 
   const { chatScope, activeFolder, activeConversation } = workspace;
   const canSendPrompt = chatScope === "global" || Boolean(activeFolder);
@@ -94,7 +102,12 @@ export default function WorkspaceView({
             icon: CalendarIcon(),
             defaultOpen: false,
             children: (
-              <Calendar token={token} refreshAccessToken={refreshAccessToken} isAdmin={currentUser.role === "admin"} />
+              <Calendar
+                token={token}
+                refreshAccessToken={refreshAccessToken}
+                isAdmin={currentUser.role === "admin"}
+                refreshKey={dataVersion}
+              />
             ),
           })}
 
@@ -108,6 +121,7 @@ export default function WorkspaceView({
                 request={apiRequest}
                 currentUser={currentUser}
                 preferredPatientId={chatScope === "patient" ? activeFolder?.patientId : null}
+                refreshKey={dataVersion}
               />
             ),
           })}

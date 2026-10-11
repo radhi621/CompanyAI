@@ -11,10 +11,12 @@ interface UseAgentChatOptions {
   workspace: Workspace;
   setBusy: (busy: boolean) => void;
   setFeedback: (feedback: string | null) => void;
+  /** Called after an approved action ran, so panels showing that data reload. */
+  onDataChanged?: () => void;
 }
 
 /** The prompt composer and the calls to the AI agent for the active conversation. */
-export function useAgentChat({ apiRequest, workspace, setBusy, setFeedback }: UseAgentChatOptions) {
+export function useAgentChat({ apiRequest, workspace, setBusy, setFeedback, onDataChanged }: UseAgentChatOptions) {
   const {
     chatScope,
     activeFolder,
@@ -157,6 +159,9 @@ export function useAgentChat({ apiRequest, workspace, setBusy, setFeedback }: Us
       });
 
       setPendingActionForConversation(activeConversationKey, null);
+      if (result.status === "executed") {
+        onDataChanged?.();
+      }
     } catch (error) {
       // Any answer from the server settles the action (it failed, was already handled, expired
       // or is not this user's), so the Approve/Reject box goes away. Only a network failure or

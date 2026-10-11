@@ -170,4 +170,17 @@ describe("PatientPanel", () => {
 
     expect(await screen.findByText("You are not assigned to this patient")).toBeTruthy();
   });
+
+  it("reloads the patient and notes when data changed elsewhere", async () => {
+    const request = fakeRequest();
+    const props = { request: request as unknown as ApiRequest, currentUser: NURSE, preferredPatientId: PATIENT._id };
+    const { rerender } = render(<PatientPanel {...props} refreshKey={0} />);
+    await screen.findByText("Notes (1)");
+    const notesLoads = () => request.mock.calls.filter(([path]) => path.endsWith("/notes?limit=100")).length;
+    const before = notesLoads();
+
+    rerender(<PatientPanel {...props} refreshKey={1} />);
+
+    await waitFor(() => expect(notesLoads()).toBe(before + 1));
+  });
 });
