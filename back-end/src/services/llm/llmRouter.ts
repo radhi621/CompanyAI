@@ -2,6 +2,7 @@ import { ApiError } from "../../utils/apiError";
 import { env } from "../../config/env";
 import { geminiClient } from "./geminiClient";
 import { groqClient } from "./groqClient";
+import type { GenerateTextOptions } from "./llmOutput";
 
 export type LLMProvider = "gemini" | "groq";
 
@@ -14,9 +15,11 @@ export interface LLMGenerateOptions {
   retriesPerProvider?: number;
   retryBaseDelayMs?: number;
   providerOrder?: LLMProvider[];
+  /** The prompt asks for a JSON object: providers run in JSON mode. */
+  json?: boolean;
 }
 
-const providerMap: Record<LLMProvider, (prompt: string) => Promise<string>> = {
+const providerMap: Record<LLMProvider, (prompt: string, options: GenerateTextOptions) => Promise<string>> = {
   gemini: geminiClient.generateText,
   groq: groqClient.generateText,
 };
@@ -76,7 +79,7 @@ export const llmRouter = {
 
       for (let attempt = 1; attempt <= retriesPerProvider; attempt += 1) {
         try {
-          const text = await generate(prompt);
+          const text = await generate(prompt, { json: options?.json });
           return {
             provider,
             text,
@@ -99,16 +102,22 @@ export const llmRouter = {
       }
     }
 
-    // Check if any error was a rate limit and extract the wait time
-    const rateLimitDelays = errors
-      .map((e) => extractRetryDelayMs(e.message))
-      .filter((ms): ms is number => ms !== null);
-
-    const maxDelaySec = rateLimitDelays.length > 0 ? Math.ceil(Math.max(...rateLimitDelays) / 1000) : null;
+    // Each provider's last failure: "rate limited" only describes the request when every
+    // provider was rate limited (a provider returning nothing is not a quota problem).
+    const lastErrors = providers.flatMap((provider) => {
+      const last = errors.filter((entry) => entry.provider === provider).at(-1);
+      return last ? [{ provider, delayMs: extractRetryDelayMs(last.message), message: last.message }] : [];
+    });
+    const allRateLimited = lastErrors.length > 0 && lastErrors.every((entry) => entry.delayMs !== null);
+    const maxDelaySec = allRateLimited
+      ? Math.ceil(Math.max(...lastErrors.map((entry) => entry.delayMs ?? 0)) / 1000)
+      : null;
 
     const message = maxDelaySec
       ? `All LLM providers are rate limited. Try again in ${maxDelaySec >= 60 ? `${Math.ceil(maxDelaySec / 60)} minute(s)` : `${maxDelaySec} second(s)`}.`
-      : "All LLM providers failed";
+      : `All LLM providers failed (${lastErrors
+          .map((entry) => `${entry.provider}: ${entry.delayMs !== null ? "rate limited" : entry.message.slice(0, 120)}`)
+          .join("; ")})`;
 
     throw new ApiError(502, message, {
       errors,
