@@ -14,6 +14,8 @@ const REQUIRED_PAYLOAD_INDEXES = [
   { fieldName: "scope", fieldSchema: "keyword" as const },
   { fieldName: "patientId", fieldSchema: "keyword" as const },
   { fieldName: "recordId", fieldSchema: "keyword" as const },
+  // Set on the points of soft-deleted records, which searches skip (see ragService).
+  { fieldName: "deleted", fieldSchema: "bool" as const },
 ];
 
 function collectionExistsFlag(value: unknown): boolean {

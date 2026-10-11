@@ -12,6 +12,12 @@ const UPLOAD_CHUNK_SIZE = 1400;
 const UPLOAD_CHUNK_OVERLAP = 180;
 const MAX_UPLOAD_CHUNKS_PER_RECORD = 40;
 
+// Soft-deleted records keep their points with deleted: true, so a restore brings back the
+// file chunks too (they cannot be rebuilt: only a short excerpt of each file is stored).
+const NOT_DELETED_CONDITION = { key: "deleted", match: { value: true } };
+
+const recordFilter = (recordId: string) => ({ must: [{ key: "recordId", match: { value: recordId } }] });
+
 function truncateText(value: string, maxLength: number): string {
   if (value.length <= maxLength) {
     return value;
@@ -139,6 +145,7 @@ export const ragService = {
               match: { value: patientId },
             },
           ],
+          must_not: [NOT_DELETED_CONDITION],
         },
       }));
     } catch (error) {
@@ -172,6 +179,7 @@ export const ragService = {
               match: { value: "global" },
             },
           ],
+          must_not: [NOT_DELETED_CONDITION],
         },
       }));
     } catch (error) {
@@ -351,19 +359,29 @@ export const ragService = {
     return chunkStats;
   },
 
-  async deleteRecordVector(recordId: string): Promise<void> {
+  /** Hides a soft-deleted record's points (summary and file chunks) from every search. */
+  async hideRecordVectors(recordId: string): Promise<void> {
     await ensureQdrantCollection();
-    await qdrantClient.delete(env.QDRANT_COLLECTION, {
+    await qdrantClient.setPayload(env.QDRANT_COLLECTION, {
       wait: true,
-      filter: {
-        must: [
-          {
-            key: "recordId",
-            match: { value: recordId },
-          },
-        ],
-      },
+      payload: { deleted: true },
+      filter: recordFilter(recordId),
     });
+  },
+
+  /** Makes a restored record's points searchable again; returns how many it has. */
+  async unhideRecordVectors(recordId: string): Promise<number> {
+    await ensureQdrantCollection();
+    await qdrantClient.setPayload(env.QDRANT_COLLECTION, {
+      wait: true,
+      payload: { deleted: false },
+      filter: recordFilter(recordId),
+    });
+    const { count } = await qdrantClient.count(env.QDRANT_COLLECTION, {
+      filter: recordFilter(recordId),
+      exact: true,
+    });
+    return count;
   },
 };
 
