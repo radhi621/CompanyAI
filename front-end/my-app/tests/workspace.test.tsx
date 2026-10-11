@@ -134,6 +134,42 @@ describe("agent chat", () => {
     expect(result.current.workspace.activeConversation.pendingAction).toBeNull();
   });
 
+  it("removes Approve/Reject when the approved action fails, so it cannot be retried in a loop", async () => {
+    const apiRequest = vi.fn(async (path: string) => {
+      if (path === "/agent/execute") {
+        return { requiresConfirmation: true, pendingActionId: "bbbbbbbbbbbbbbbbbbbbbbbb", message: "Please confirm…" };
+      }
+      throw new Error("Requested time is outside the doctor's working hours | HTTP 400 POST /agent/actions/b/confirm");
+    });
+    const { result } = renderWorkspace(apiRequest as unknown as ApiRequest);
+
+    act(() => result.current.chat.setPromptInput("Book Leila tomorrow at 7:00"));
+    await act(() => result.current.chat.handleSendPrompt(formEvent));
+    await act(() => result.current.chat.handleConfirmPendingAction(true));
+
+    expect(result.current.workspace.activeConversation.pendingAction).toBeNull();
+    const messages = result.current.workspace.activeConversation.messages;
+    expect(messages[messages.length - 1].text).toBe(
+      "The action was not completed: Requested time is outside the doctor's working hours",
+    );
+  });
+
+  it("keeps Approve/Reject after a network error, to try again", async () => {
+    const apiRequest = vi.fn(async (path: string) => {
+      if (path === "/agent/execute") {
+        return { requiresConfirmation: true, pendingActionId: "cccccccccccccccccccccccc", message: "Please confirm…" };
+      }
+      throw new Error("Failed to fetch");
+    });
+    const { result } = renderWorkspace(apiRequest as unknown as ApiRequest);
+
+    act(() => result.current.chat.setPromptInput("Delete that note"));
+    await act(() => result.current.chat.handleSendPrompt(formEvent));
+    await act(() => result.current.chat.handleConfirmPendingAction(true));
+
+    expect(result.current.workspace.activeConversation.pendingAction?.id).toBe("cccccccccccccccccccccccc");
+  });
+
   it("sends the folder's patient with each message, and words quick actions for it", async () => {
     const apiRequest = vi.fn(async () => ({ requiresConfirmation: false, finalMessage: "Summary." }));
     const { result } = renderWorkspace(apiRequest as unknown as ApiRequest);

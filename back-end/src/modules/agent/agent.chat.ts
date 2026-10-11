@@ -67,6 +67,8 @@ export function buildSystemPrompt(actor: AuthUser, patient: ChatPatientContext |
         "action and approves or rejects it in the app. When the user asks for a change, call the tool directly with real " +
         "IDs; do not ask \"are you sure?\" yourself and do not call it twice. The conversation shows later whether the user " +
         "approved it (and the result) or rejected it.",
+      "- Before proposing to book an appointment, check the doctor's availability at that time with check_availability. " +
+        "If the doctor is not available, say why and offer free times (get_day_schedule) instead of proposing the booking.",
       "- If a request is ambiguous (several matching patients, no date given), ask one short question instead of guessing.",
       "- If a tool returns an error, correct the call (for example look up the missing ID) or explain the problem briefly.",
       "- You support medical staff; you do not diagnose or prescribe. Report what the records say.",

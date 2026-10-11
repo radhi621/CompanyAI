@@ -21,6 +21,17 @@ export function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unexpected error";
 }
 
+/** The HTTP status of a failed apiRequest call ("… | HTTP 409 POST …"), or null for network errors. */
+export function httpStatusOf(error: unknown): number | null {
+  const match = /\| HTTP (\d{3}) /.exec(extractErrorMessage(error));
+  return match ? Number(match[1]) : null;
+}
+
+/** An apiRequest error without its debugging suffix. */
+export function readableApiError(error: unknown): string {
+  return extractErrorMessage(error).split(" | HTTP ")[0];
+}
+
 // For the sign-in and setup screens: drop apiRequest's debugging suffix and explain network failures.
 export function readableAuthError(error: unknown): string {
   const message = extractErrorMessage(error);
