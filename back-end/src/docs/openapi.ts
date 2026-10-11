@@ -1,10 +1,19 @@
+const queryParam = (name: string, type: "string" | "integer" | "boolean", description: string) => ({
+  in: "query",
+  name,
+  required: false,
+  schema: { type },
+  description,
+});
+
 export const openApiDocument = {
   openapi: "3.0.3",
   info: {
     title: "MediAssist IA API",
     version: "1.0.0",
     description:
-      "Medical department backend API with role-based access, scheduling, appointments, and AI (RAG + non-RAG).",
+      "Medical department backend API with role-based access, scheduling, appointments, and AI (RAG + non-RAG). " +
+      "The assistant and AI record routes are rate-limited per user (HTTP 429 when exceeded).",
   },
   servers: [
     {
@@ -23,10 +32,28 @@ export const openApiDocument = {
   },
   security: [{ bearerAuth: [] }],
   paths: {
+    "/health": {
+      get: {
+        tags: ["System"],
+        summary: "Public: service and dependency status",
+        description:
+          "Served at /health (outside /api/v1). status is ok, degraded (Qdrant unreachable: uploaded-file search unavailable) " +
+          "or down (MongoDB unreachable, HTTP 503); checks reports database and vectorStore.",
+        security: [],
+        servers: [{ url: "/" }],
+      },
+    },
     "/auth/setup-status": {
       get: {
         tags: ["Auth"],
         summary: "Public: whether the first admin still needs to be created (first-run setup)",
+        security: [],
+      },
+    },
+    "/auth/bootstrap-admin": {
+      post: {
+        tags: ["Auth"],
+        summary: "Public, first run only: create the first admin with the BOOTSTRAP_ADMIN_KEY (rate-limited)",
         security: [],
       },
     },
@@ -40,6 +67,13 @@ export const openApiDocument = {
       post: {
         tags: ["Auth"],
         summary: "Rotate the refresh token (cookie) and issue a new access token",
+      },
+    },
+    "/auth/logout": {
+      post: {
+        tags: ["Auth"],
+        summary: "Revoke the refresh token (cookie) and clear it",
+        security: [],
       },
     },
     "/auth/me": {
@@ -190,6 +224,20 @@ export const openApiDocument = {
       get: {
         tags: ["AI"],
         summary: "List AI records",
+        parameters: [
+          queryParam("patientId", "string", "Only this patient's records"),
+          queryParam("mode", "string", "rag or non_rag"),
+          queryParam("includeDeleted", "boolean", "Include soft-deleted records"),
+          queryParam("hasFiles", "boolean", "Only records created from uploaded files (without their context chunks)"),
+          queryParam("limit", "integer", "Maximum records, 1-100 (default 20)"),
+        ],
+      },
+    },
+    "/ai/global/upload": {
+      post: {
+        tags: ["AI"],
+        summary: "Upload documents to the global knowledge base, shared by all patients (admin only)",
+        description: "multipart/form-data with files[] (up to 8).",
       },
     },
     "/ai/records/generate": {
@@ -220,10 +268,30 @@ export const openApiDocument = {
         summary: "Soft delete AI record",
       },
     },
+    "/ai/records/{recordId}/replace": {
+      post: {
+        tags: ["AI"],
+        summary: "Replace an uploaded record's files (owner or higher role)",
+        description:
+          "multipart/form-data with files[] (up to 8). Creates a new record from the new files, then soft-deletes the old one " +
+          "and its search index entries.",
+      },
+    },
     "/ai/records/{recordId}/restore": {
       post: {
         tags: ["AI"],
         summary: "Restore soft deleted AI record",
+      },
+    },
+    "/agent/history": {
+      get: {
+        tags: ["Agent"],
+        summary: "Your assistant request history from the audit log (admins can pass actorId)",
+        parameters: [
+          queryParam("limit", "integer", "Maximum entries, 1-100 (default 40)"),
+          queryParam("includeFailures", "boolean", "Include failed requests"),
+          queryParam("actorId", "string", "Another user's history (admin only)"),
+        ],
       },
     },
     "/agent/execute": {
